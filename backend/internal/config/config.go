@@ -10,12 +10,22 @@ import (
 )
 
 type ProviderConfig struct {
-	ID      string   `json:"id"`
-	Label   string   `json:"label"`
-	Type    string   `json:"type"`
-	BaseURL string   `json:"baseUrl"`
-	APIKey  string   `json:"-"`
-	Models  []string `json:"models"`
+	ID                 string                  `json:"id"`
+	Label              string                  `json:"label"`
+	Type               string                  `json:"type"`
+	BaseURL            string                  `json:"baseUrl"`
+	APIKey             string                  `json:"-"`
+	Models             []string                `json:"models"`
+	StreamIncludeUsage bool                    `json:"-"`
+	ModelPricing       map[string]ModelPricing `json:"-"`
+}
+
+// ModelPricing uses USD per one million tokens. It intentionally lives in
+// configuration because providers report usage while deployment owners define
+// the prices they are billed.
+type ModelPricing struct {
+	InputUSDPerMillionTokens  float64
+	OutputUSDPerMillionTokens float64
 }
 
 type Config struct {
@@ -28,6 +38,7 @@ type Config struct {
 	JWTSecret               string
 	JWTTTL                  time.Duration
 	CORSAllowedOrigins      []string
+	LogLevel                string
 	SystemPrompt            string
 	Providers               []ProviderConfig
 }
@@ -62,6 +73,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("parse DATABASE_CONN_MAX_IDLE_TIME: %w", err)
 	}
 
+	providers, err := configuredProviders()
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		HTTPAddr:                env("HTTP_ADDR", ":8080"),
 		DatabaseURL:             env("DATABASE_URL", "postgres://agent:agent_dev_password@localhost:5432/agent_platform?sslmode=disable"),
@@ -72,14 +88,9 @@ func Load() (Config, error) {
 		JWTSecret:               os.Getenv("JWT_SECRET"),
 		JWTTTL:                  ttl,
 		CORSAllowedOrigins:      splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
+		LogLevel:                env("LOG_LEVEL", "INFO"),
 		SystemPrompt:            env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
-		Providers: []ProviderConfig{
-			provider("openai", "OpenAI", "openai-compatible", "OPENAI", "https://api.openai.com/v1", "gpt-4o-mini"),
-			provider("kimi", "Kimi", "openai-compatible", "KIMI", "https://api.moonshot.cn/v1", "moonshot-v1-8k"),
-			provider("anthropic", "Anthropic", "anthropic", "ANTHROPIC", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"),
-			provider("deepseek", "DeepSeek", "openai-compatible", "DEEPSEEK", "https://api.deepseek.com/v1", "deepseek-chat"),
-			provider("glm", "GLM", "openai-compatible", "GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
-		},
+		Providers:               providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
 		return Config{}, fmt.Errorf("JWT_SECRET must contain at least 32 characters")
@@ -95,15 +106,39 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-func provider(id, label, kind, prefix, defaultBaseURL, defaultModels string) ProviderConfig {
-	return ProviderConfig{
-		ID:      id,
-		Label:   label,
-		Type:    kind,
-		BaseURL: strings.TrimRight(env(prefix+"_BASE_URL", defaultBaseURL), "/"),
-		APIKey:  os.Getenv(prefix + "_API_KEY"),
-		Models:  splitCSV(env(prefix+"_MODELS", defaultModels)),
+func configuredProviders() ([]ProviderConfig, error) {
+	type providerDefinition struct {
+		id, label, kind, prefix, baseURL, models string
 	}
+	definitions := []providerDefinition{
+		{"openai", "OpenAI", "openai-compatible", "OPENAI", "https://api.openai.com/v1", "gpt-4o-mini"},
+		{"kimi", "Kimi", "openai-compatible", "KIMI", "https://api.moonshot.cn/v1", "moonshot-v1-8k"},
+		{"anthropic", "Anthropic", "anthropic", "ANTHROPIC", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"},
+		{"deepseek", "DeepSeek", "openai-compatible", "DEEPSEEK", "https://api.deepseek.com/v1", "deepseek-chat"},
+		{"glm", "GLM", "openai-compatible", "GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"},
+	}
+	result := make([]ProviderConfig, 0, len(definitions))
+	for _, definition := range definitions {
+		pricing, err := parseModelPricing(env(definition.prefix+"_MODEL_PRICING", ""))
+		if err != nil {
+			return nil, fmt.Errorf("parse %s_MODEL_PRICING: %w", definition.prefix, err)
+		}
+		includeUsage, err := boolEnv(definition.prefix+"_STREAM_INCLUDE_USAGE", true)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, ProviderConfig{
+			ID:                 definition.id,
+			Label:              definition.label,
+			Type:               definition.kind,
+			BaseURL:            strings.TrimRight(env(definition.prefix+"_BASE_URL", definition.baseURL), "/"),
+			APIKey:             os.Getenv(definition.prefix + "_API_KEY"),
+			Models:             splitCSV(env(definition.prefix+"_MODELS", definition.models)),
+			StreamIncludeUsage: includeUsage,
+			ModelPricing:       pricing,
+		})
+	}
+	return result, nil
 }
 
 func env(key, fallback string) string {
@@ -120,6 +155,40 @@ func positiveIntEnv(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
 	return parsed, nil
+}
+
+func boolEnv(key string, fallback bool) (bool, error) {
+	value := env(key, strconv.FormatBool(fallback))
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", key, err)
+	}
+	return parsed, nil
+}
+
+// parseModelPricing accepts comma-separated entries in the form
+// model:input_usd_per_million:output_usd_per_million.
+func parseModelPricing(value string) (map[string]ModelPricing, error) {
+	pricing := make(map[string]ModelPricing)
+	if strings.TrimSpace(value) == "" {
+		return pricing, nil
+	}
+	for _, item := range splitCSV(value) {
+		parts := strings.Split(item, ":")
+		if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" {
+			return nil, fmt.Errorf("%q must be model:input:output", item)
+		}
+		input, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		if err != nil || input < 0 {
+			return nil, fmt.Errorf("%q has an invalid input price", item)
+		}
+		output, err := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+		if err != nil || output < 0 {
+			return nil, fmt.Errorf("%q has an invalid output price", item)
+		}
+		pricing[strings.TrimSpace(parts[0])] = ModelPricing{InputUSDPerMillionTokens: input, OutputUSDPerMillionTokens: output}
+	}
+	return pricing, nil
 }
 
 func splitCSV(value string) []string {

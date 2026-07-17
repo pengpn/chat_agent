@@ -94,6 +94,8 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 
 func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent func(provider.StreamEvent)) (model.Message, string, error) {
 	var answer strings.Builder
+	var usage provider.TokenUsage
+	usageReported := false
 	status := "complete"
 	for event := range session.provider.ChatStream(ctx, session.request) {
 		if event.Err != nil {
@@ -105,6 +107,10 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 			answer.WriteString(event.Delta)
 			onEvent(event)
 		}
+		if event.Usage != nil {
+			usage.Merge(*event.Usage)
+			usageReported = true
+		}
 		if event.Done {
 			break
 		}
@@ -112,6 +118,15 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	if ctx.Err() != nil {
 		status = "stopped"
 	}
-	completed, err := s.repository.Finalize(context.Background(), session.AssistantMessage.ID, answer.String(), status)
+	usageData := model.MessageUsage{
+		InputTokens:   usage.InputTokens,
+		OutputTokens:  usage.OutputTokens,
+		TotalTokens:   usage.TotalTokens,
+		UsageReported: usageReported,
+	}
+	if usageReported {
+		usageData.CostNanoUSD, usageData.CostKnown = s.providers.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
+	}
+	completed, err := s.repository.Finalize(context.Background(), session.AssistantMessage.ID, answer.String(), status, usageData)
 	return completed, status, err
 }

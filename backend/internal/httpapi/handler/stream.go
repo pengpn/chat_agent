@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/example/agent-platform/backend/internal/httpapi/response"
+	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/service"
 	"github.com/gin-gonic/gin"
@@ -44,7 +44,7 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 		response.WriteErrorResp(c, http.StatusBadRequest, providerSelectionError.Error())
 		return
 	case err != nil:
-		slog.Error("prepare message stream", "error", err)
+		logger.Error(c.Request.Context(), "prepare message stream failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -71,9 +71,22 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 		}
 	})
 	if err != nil {
-		slog.Error("finalize streamed message", "error", err)
+		logger.Error(c.Request.Context(), "finalize streamed message failed", logger.Err(err))
 		return
 	}
+	logger.Info(c.Request.Context(), "model stream completed",
+		logger.String("conversation_id", c.Param("conversationID")),
+		logger.String("assistant_message_id", completed.ID),
+		logger.String("provider", completed.Provider),
+		logger.String("model", completed.Model),
+		logger.String("status", status),
+		logger.Int64("input_tokens", completed.InputTokens),
+		logger.Int64("output_tokens", completed.OutputTokens),
+		logger.Int64("total_tokens", completed.TotalTokens),
+		logger.Bool("usage_reported", completed.UsageReported),
+		logger.Int64("cost_nano_usd", completed.CostNanoUSD),
+		logger.Bool("cost_known", completed.CostKnown),
+	)
 	if status == "complete" {
 		writeSSE(c.Writer, flusher, "done", gin.H{"assistantMessage": completed})
 	}

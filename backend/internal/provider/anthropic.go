@@ -86,11 +86,25 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 				Delta struct {
 					Text string `json:"text"`
 				} `json:"delta"`
+				Message struct {
+					Usage struct {
+						InputTokens  int64 `json:"input_tokens"`
+						OutputTokens int64 `json:"output_tokens"`
+					} `json:"usage"`
+				} `json:"message"`
+				Usage struct {
+					InputTokens  int64 `json:"input_tokens"`
+					OutputTokens int64 `json:"output_tokens"`
+				} `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue
 			}
 			switch chunk.Type {
+			case "message_start":
+				usage := TokenUsage{InputTokens: chunk.Message.Usage.InputTokens, OutputTokens: chunk.Message.Usage.OutputTokens}
+				usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+				sendEvent(ctx, events, StreamEvent{Usage: &usage})
 			case "content_block_delta":
 				if chunk.Delta.Text != "" {
 					sendEvent(ctx, events, StreamEvent{Delta: chunk.Delta.Text})
@@ -98,6 +112,10 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 			case "message_stop":
 				sendEvent(ctx, events, StreamEvent{Done: true})
 				return
+			case "message_delta":
+				usage := TokenUsage{InputTokens: chunk.Usage.InputTokens, OutputTokens: chunk.Usage.OutputTokens}
+				usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+				sendEvent(ctx, events, StreamEvent{Usage: &usage})
 			case "error":
 				sendEvent(ctx, events, StreamEvent{Err: fmt.Errorf("Anthropic returned a streaming error")})
 				return

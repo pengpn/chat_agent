@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +13,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/config"
 	"github.com/example/agent-platform/backend/internal/database"
 	"github.com/example/agent-platform/backend/internal/httpapi"
+	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
 )
@@ -21,9 +21,14 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("invalid configuration", "error", err)
+		_, _ = os.Stderr.WriteString("invalid configuration: " + err.Error() + "\n")
 		os.Exit(1)
 	}
+	if err := logger.Init(cfg.LogLevel, os.Stdout); err != nil {
+		_, _ = os.Stderr.WriteString("invalid LOG_LEVEL: " + err.Error() + "\n")
+		os.Exit(1)
+	}
+	defer logger.Sync()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -35,13 +40,13 @@ func main() {
 		ConnMaxIdleTime: cfg.DatabaseConnMaxIdleTime,
 	})
 	if err != nil {
-		slog.Error("database connection failed", "error", err)
+		logger.Error(context.Background(), "database connection failed", logger.Err(err))
 		os.Exit(1)
 	}
 	defer sqlDB.Close()
 
 	if err := repository.Migrate(ctx, db); err != nil {
-		slog.Error("database migration failed", "error", err)
+		logger.Error(context.Background(), "database migration failed", logger.Err(err))
 		os.Exit(1)
 	}
 	repositories := repository.New(db)
@@ -57,9 +62,9 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("api server starting", "address", cfg.HTTPAddr, "providers", providers.IDs())
+		logger.Info(context.Background(), "api server starting", logger.String("address", cfg.HTTPAddr), logger.Strings("providers", providers.IDs()))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("api server failed", "error", err)
+			logger.Error(context.Background(), "api server failed", logger.Err(err))
 			os.Exit(1)
 		}
 	}()
@@ -71,6 +76,6 @@ func main() {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		slog.Error("graceful shutdown failed", "error", err)
+		logger.Error(context.Background(), "graceful shutdown failed", logger.Err(err))
 	}
 }

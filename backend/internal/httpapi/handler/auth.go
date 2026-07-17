@@ -2,10 +2,10 @@ package handler
 
 import (
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/example/agent-platform/backend/internal/httpapi/response"
+	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -30,7 +30,7 @@ func (h *Handler) Register(c *gin.Context) {
 	case errors.Is(err, service.ErrEmailAlreadyRegistered):
 		response.WriteErrorResp(c, http.StatusConflict, "该邮箱已注册")
 	case err != nil:
-		slog.Error("register", "error", err)
+		logger.Error(c.Request.Context(), "register failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "无法创建账户")
 	default:
 		response.WriteOKResp(c, gin.H{"user": result.User, "accessToken": result.AccessToken, "expiresAt": result.ExpiresAt})
@@ -48,7 +48,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		slog.Error("login", "error", err)
+		logger.Error(c.Request.Context(), "login failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -62,7 +62,7 @@ func (h *Handler) Me(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		slog.Error("get current user", "error", err)
+		logger.Error(c.Request.Context(), "get current user failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}

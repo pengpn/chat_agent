@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/example/agent-platform/backend/internal/config"
@@ -26,6 +27,23 @@ func TestRouterHealthCheck(t *testing.T) {
 	}
 }
 
+func TestRouterReturnsAndPropagatesRequestID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := NewServer(repository.New(nil), nil, nil, config.Config{})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set("X-Request-ID", "trace-2026.07")
+
+	server.Router().ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("X-Request-ID"); got != "trace-2026.07" {
+		t.Fatalf("request id = %q", got)
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("content type = %q", got)
+	}
+}
+
 func TestRouterHandlesCORSPreflight(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	server := NewServer(repository.New(nil), nil, nil, config.Config{CORSAllowedOrigins: []string{"http://localhost:5173"}})
@@ -40,5 +58,8 @@ func TestRouterHandlesCORSPreflight(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
 		t.Fatalf("allow origin = %q", got)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "X-Request-ID") {
+		t.Fatalf("allow headers = %q", got)
 	}
 }

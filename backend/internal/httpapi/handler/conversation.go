@@ -2,10 +2,10 @@ package handler
 
 import (
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/example/agent-platform/backend/internal/httpapi/response"
+	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -13,7 +13,7 @@ import (
 func (h *Handler) ListConversations(c *gin.Context) {
 	items, err := h.conversations.List(c.Request.Context(), currentUserID(c))
 	if err != nil {
-		slog.Error("list conversations", "error", err)
+		logger.Error(c.Request.Context(), "list conversations failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -29,7 +29,7 @@ func (h *Handler) CreateConversation(c *gin.Context) {
 	}
 	conversation, err := h.conversations.Create(c.Request.Context(), currentUserID(c), input.Title)
 	if err != nil {
-		slog.Error("create conversation", "error", err)
+		logger.Error(c.Request.Context(), "create conversation failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -39,7 +39,7 @@ func (h *Handler) CreateConversation(c *gin.Context) {
 func (h *Handler) ListMessages(c *gin.Context) {
 	items, err := h.conversations.ListMessages(c.Request.Context(), currentUserID(c), c.Param("conversationID"))
 	if err != nil {
-		slog.Error("list messages", "error", err)
+		logger.Error(c.Request.Context(), "list messages failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
@@ -60,7 +60,7 @@ func (h *Handler) UpdateConversation(c *gin.Context) {
 	case errors.Is(err, service.ErrConversationNotFound):
 		response.WriteErrorResp(c, http.StatusNotFound, "对话不存在")
 	case err != nil:
-		slog.Error("update conversation", "error", err)
+		logger.Error(c.Request.Context(), "update conversation failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 	default:
 		response.WriteOKResp(c, gin.H{"conversation": conversation})
@@ -74,7 +74,7 @@ func (h *Handler) DeleteConversation(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		slog.Error("delete conversation", "error", err)
+		logger.Error(c.Request.Context(), "delete conversation failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}

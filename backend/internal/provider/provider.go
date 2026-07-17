@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/example/agent-platform/backend/internal/config"
@@ -21,8 +22,26 @@ type ChatRequest struct {
 
 type StreamEvent struct {
 	Delta string
+	Usage *TokenUsage
 	Done  bool
 	Err   error
+}
+
+// TokenUsage contains token counts reported by a model API. Counts are merged
+// by maximum because streaming APIs typically emit cumulative usage snapshots.
+type TokenUsage struct {
+	InputTokens  int64
+	OutputTokens int64
+	TotalTokens  int64
+}
+
+func (u *TokenUsage) Merge(other TokenUsage) {
+	u.InputTokens = max(u.InputTokens, other.InputTokens)
+	u.OutputTokens = max(u.OutputTokens, other.OutputTokens)
+	u.TotalTokens = max(u.TotalTokens, other.TotalTokens)
+	if u.TotalTokens < u.InputTokens+u.OutputTokens {
+		u.TotalTokens = u.InputTokens + u.OutputTokens
+	}
 }
 
 type Provider interface {
@@ -91,4 +110,22 @@ func (r *Registry) IDs() []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// CalculateCost converts provider-reported token usage into nano USD using
+// deployment-provided pricing. It returns false when no price is configured
+// for the selected model.
+func (r *Registry) CalculateCost(providerID, model string, usage TokenUsage) (int64, bool) {
+	cfg, ok := r.configs[providerID]
+	if !ok {
+		return 0, false
+	}
+	pricing, ok := cfg.ModelPricing[model]
+	if !ok {
+		return 0, false
+	}
+	// USD / million tokens * tokens * 1e9 nano USD / 1e6 tokens.
+	cost := float64(usage.InputTokens)*pricing.InputUSDPerMillionTokens*1_000 +
+		float64(usage.OutputTokens)*pricing.OutputUSDPerMillionTokens*1_000
+	return int64(math.Round(cost)), true
 }

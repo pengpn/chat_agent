@@ -12,6 +12,24 @@ type Message struct {
 	Provider       string        `json:"provider,omitempty" gorm:"type:text"`
 	Model          string        `json:"model,omitempty" gorm:"type:text"`
 	Status         string        `json:"status" gorm:"type:text;not null;default:complete;check:messages_status_check,status IN ('streaming', 'complete', 'stopped', 'error')"`
+	InputTokens    int64         `json:"inputTokens" gorm:"not null;default:0"`
+	OutputTokens   int64         `json:"outputTokens" gorm:"not null;default:0"`
+	TotalTokens    int64         `json:"totalTokens" gorm:"not null;default:0"`
+	UsageReported  bool          `json:"usageReported" gorm:"not null;default:false"`
+	CostNanoUSD    int64         `json:"costNanoUsd" gorm:"not null;default:0"`
+	CostKnown      bool          `json:"costKnown" gorm:"not null;default:false"`
 	CreatedAt      time.Time     `json:"createdAt" gorm:"index:messages_conversation_created_idx,priority:2"`
 	UpdatedAt      time.Time     `json:"-"`
+}
+
+// MessageUsage is the final accounting data saved with an assistant message.
+// CostNanoUSD represents one billionth of a US dollar, avoiding float-based
+// monetary persistence (1 USD = 1,000,000,000 nano USD).
+type MessageUsage struct {
+	InputTokens   int64
+	OutputTokens  int64
+	TotalTokens   int64
+	UsageReported bool
+	CostNanoUSD   int64
+	CostKnown     bool
 }

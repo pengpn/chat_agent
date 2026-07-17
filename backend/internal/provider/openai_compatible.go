@@ -15,13 +15,14 @@ import (
 )
 
 type openAICompatible struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	baseURL      string
+	apiKey       string
+	includeUsage bool
+	client       *http.Client
 }
 
 func NewOpenAICompatible(cfg config.ProviderConfig) Provider {
-	return &openAICompatible{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, client: &http.Client{Timeout: 10 * time.Minute}}
+	return &openAICompatible{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, includeUsage: cfg.StreamIncludeUsage, client: &http.Client{Timeout: 10 * time.Minute}}
 }
 
 func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) <-chan StreamEvent {
@@ -29,11 +30,19 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 	go func() {
 		defer close(events)
 		body := struct {
-			Model       string    `json:"model"`
-			Messages    []Message `json:"messages"`
-			Stream      bool      `json:"stream"`
-			Temperature *float64  `json:"temperature,omitempty"`
+			Model         string    `json:"model"`
+			Messages      []Message `json:"messages"`
+			Stream        bool      `json:"stream"`
+			StreamOptions *struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options,omitempty"`
+			Temperature *float64 `json:"temperature,omitempty"`
 		}{Model: request.Model, Messages: request.Messages, Stream: true, Temperature: request.Temperature}
+		if p.includeUsage {
+			body.StreamOptions = &struct {
+				IncludeUsage bool `json:"include_usage"`
+			}{IncludeUsage: true}
+		}
 		payload, err := json.Marshal(body)
 		if err != nil {
 			sendEvent(ctx, events, StreamEvent{Err: err})
@@ -79,9 +88,21 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 						Content string `json:"content"`
 					} `json:"delta"`
 				} `json:"choices"`
+				Usage *struct {
+					PromptTokens     int64 `json:"prompt_tokens"`
+					CompletionTokens int64 `json:"completion_tokens"`
+					TotalTokens      int64 `json:"total_tokens"`
+				} `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				continue
+			}
+			if chunk.Usage != nil {
+				sendEvent(ctx, events, StreamEvent{Usage: &TokenUsage{
+					InputTokens:  chunk.Usage.PromptTokens,
+					OutputTokens: chunk.Usage.CompletionTokens,
+					TotalTokens:  chunk.Usage.TotalTokens,
+				}})
 			}
 			for _, choice := range chunk.Choices {
 				if choice.Delta.Content != "" {

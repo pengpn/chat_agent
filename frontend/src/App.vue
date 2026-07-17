@@ -84,12 +84,15 @@ async function selectConversation(id: string) {
   }
 }
 
-async function updateTitle(conversation: Conversation) {
+async function updateTitle(conversation: Conversation, done?: (success: boolean, message?: string) => void) {
   try {
     const updated = await renameConversation(conversation.id, conversation.title)
     conversations.value = conversations.value.map((item) => item.id === updated.id ? updated : item)
+    done?.(true)
   } catch (cause) {
-    error.value = messageFor(cause)
+    const message = messageFor(cause)
+    error.value = message
+    done?.(false, message)
   }
 }
 

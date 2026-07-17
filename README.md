@@ -13,6 +13,7 @@
 - OpenAI-compatible 适配器：OpenAI、Kimi、DeepSeek、GLM 复用同一协议实现
 - Anthropic Messages API 原生流式适配器
 - 通过环境变量启用模型；前端只看到已配置密钥的模型，密钥永不离开后端
+- Zap JSON 结构化日志、全链路 `X-Request-ID`，以及每次模型调用的 token/成本记录
 - Docker Compose 一键启动 PostgreSQL
 
 ## 快速启动
@@ -58,6 +59,7 @@ backend/
     handler/                  # HTTP 入参解析、调用 Service、返回响应
     middleware/               # 鉴权、CORS、日志、panic 恢复
     response/                 # 统一的 code/msg/data JSON 响应包装
+  internal/logger/            # Zap 日志封装、Request ID 上下文
   internal/provider/          # 统一模型接口与协议适配器
 frontend/src/                 # Vue 3 对话 UI
 ```
@@ -87,15 +89,35 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 
 业务失败时 `code` 为 `-1`，并保留真实 HTTP 状态码（例如 `401`、`404`、`500`）；SSE 仍使用原始事件帧，不套 JSON 响应壳。
 
+## 可观测性与成本
+
+服务输出 Zap JSON 日志。每个请求都会生成或透传 `X-Request-ID`，并在响应头返回；业务日志和请求完成日志都会自动带上 `request_id`。调用侧使用 `logger.Info(ctx, ...)`、`logger.Error(ctx, ...)` 与字段助手（例如 `logger.String`、`logger.Err`），无需自行初始化或拼接日志字段。
+
+每条 assistant 消息会额外保存：
+
+- `inputTokens`、`outputTokens`、`totalTokens`：模型 API 实际返回的 token 用量；
+- `usageReported`：Provider 是否返回了可用用量；
+- `costNanoUsd`、`costKnown`：根据部署配置计算的成本及其有效性。
+
+OpenAI-compatible Provider 会请求 `stream_options.include_usage`，以取得流式回答最后一个用量块；若某个兼容服务不支持该字段，可以设置对应的 `*_STREAM_INCLUDE_USAGE=false`。Anthropic 的原生流事件会直接解析其用量字段。
+
+成本单价由部署者配置，避免将会变动的厂商价格硬编码进项目。以 OpenAI 为例：
+
+```dotenv
+# 单位：美元 / 百万 input token : 美元 / 百万 output token
+OPENAI_MODEL_PRICING=gpt-4o-mini:0.15:0.60
+```
+
+可使用逗号配置多个模型。成本以纳美元整数保存（`1 USD = 1,000,000,000 nano USD`），避免浮点精度问题；未配置模型单价时，token 用量仍会保存，但 `costKnown=false`。
+
 ## 设计要点与下一步
 
 `provider.Provider` 是核心扩展点。新增供应商只需实现 `ChatStream(ctx, request) <-chan StreamEvent`，然后在 `provider.NewRegistry` 注册；上层 HTTP 和数据库完全不用改。OpenAI 兼容协议的供应商只需新增一段配置。
 
 建议按这个顺序扩展：
 
-1. 引入结构化日志、请求 ID、token 用量与成本记录。
-2. 增加 OpenAI tool calling，工具在服务端注册与执行。
-3. 增加文档上传、切分、embedding、pgvector 检索（RAG）。
-4. 为 Agent 增加循环上限、工具权限、审计和可观测 trace。
+1. 增加 OpenAI tool calling，工具在服务端注册与执行。
+2. 增加文档上传、切分、embedding、pgvector 检索（RAG）。
+3. 为 Agent 增加循环上限、工具权限、审计和可观测 trace。
 
 生产环境请使用强随机 `JWT_SECRET`、HTTPS、受限 CORS、密钥管理服务与数据库备份；目前的自动迁移适合作为学习与开发起点。

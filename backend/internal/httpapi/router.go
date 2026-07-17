@@ -10,7 +10,7 @@ import (
 // Router builds the Gin engine and registers the public and authenticated API routes.
 func (s *Server) Router() http.Handler {
 	engine := gin.New()
-	engine.Use(middleware.Recovery(), middleware.CORS(s.corsAllowedOrigins), middleware.RequestLogger())
+	engine.Use(middleware.Recovery(), middleware.RequestID(), middleware.RequestLogger(), middleware.CORS(s.corsAllowedOrigins))
 	engine.GET("/healthz", s.handlers.Healthz)
 
 	api := engine.Group("/api/v1")
