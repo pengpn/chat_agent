@@ -9,9 +9,11 @@
 - 邮箱密码注册、登录、JWT 鉴权
 - 一个用户下创建、重命名、删除多个对话
 - PostgreSQL 持久化用户、对话和完整消息历史
-- SSE 推送 token 增量，前端边接收边渲染
+- 同时支持非流式 `Chat` 与 SSE `ChatStream`；流式推送 token 与模型思考增量，前端边接收边渲染
 - OpenAI-compatible 适配器：OpenAI、Kimi、DeepSeek、GLM 复用同一协议实现
-- Anthropic Messages API 原生流式适配器
+- Anthropic Messages API 原生 `Chat` / `ChatStream` 适配器
+- 可选主动思考：通过 `ENABLE_THINKING=true` 让受支持的模型返回推理摘要
+- OpenAI-compatible function calling：模型可请求服务端白名单工具，当前内置安全算术 `calculator`
 - 通过环境变量启用模型；前端只看到已配置密钥的模型，密钥永不离开后端
 - Zap JSON 结构化日志、全链路 `X-Request-ID`，以及每次模型调用的 token/成本记录
 - Docker Compose 一键启动 PostgreSQL
@@ -61,6 +63,7 @@ backend/
     response/                 # 统一的 code/msg/data JSON 响应包装
   internal/logger/            # Zap 日志封装、Request ID 上下文
   internal/provider/          # 统一模型接口与协议适配器
+  internal/tool/              # 服务端工具定义、白名单与执行实现
 frontend/src/                 # Vue 3 对话 UI
 ```
 
@@ -76,10 +79,14 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 | POST | `/api/v1/auth/login` | 登录 |
 | GET | `/api/v1/models` | 已配置、可用的 Provider / 模型 |
 | GET/POST | `/api/v1/conversations` | 对话列表 / 新建对话 |
-| GET/PATCH/DELETE | `/api/v1/conversations/:id` | 消息历史 / 重命名 / 删除 |
+| PATCH/DELETE | `/api/v1/conversations/:id` | 重命名 / 删除对话 |
+| GET | `/api/v1/conversations/:id/messages` | 获取消息历史 |
 | POST | `/api/v1/conversations/:id/messages` | SSE 流式发送消息 |
+| POST | `/api/v1/conversations/:id/messages/chat` | 非流式发送消息，返回完整结果 |
 
-流式接口依次发送 `metadata`、多个 `delta`、最后的 `done` 事件；发生错误时发送 `error`。客户端中断连接会保留已生成的内容，并将消息状态标记为 `stopped`。
+流式接口依次发送 `metadata`、多个 `think`（模型思考增量）、多个 `delta`（最终回答增量）、最后的 `done` 事件；发生错误时发送 `error`。客户端中断连接会保留已生成的内容，并将消息状态标记为 `stopped`。
+
+非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 
 除 `204 No Content` 与 SSE 接口外，REST 响应统一为：
 
@@ -95,6 +102,7 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 
 每条 assistant 消息会额外保存：
 
+- `think`：模型返回的思考/推理内容（若 Provider 支持）；
 - `inputTokens`、`outputTokens`、`totalTokens`：模型 API 实际返回的 token 用量；
 - `usageReported`：Provider 是否返回了可用用量；
 - `costNanoUsd`、`costKnown`：根据部署配置计算的成本及其有效性。
@@ -110,14 +118,35 @@ OPENAI_MODEL_PRICING=gpt-4o-mini:0.15:0.60
 
 可使用逗号配置多个模型。成本以纳美元整数保存（`1 USD = 1,000,000,000 nano USD`），避免浮点精度问题；未配置模型单价时，token 用量仍会保存，但 `costKnown=false`。
 
+## 主动开启 Think
+
+默认不要求模型输出推理。部署时可设置：
+
+```dotenv
+ENABLE_THINKING=true
+# Anthropic 内部推理的 token 上限；必须在 1024 到 4095 之间，默认 2048。
+THINKING_BUDGET_TOKENS=2048
+```
+
+开关启用后，服务端仅向已确认支持的组合发送原生参数：DeepSeek V4、GLM `4.5+` / `5+` 与 Claude Sonnet / Opus。OpenAI、Kimi 以及不匹配的模型仍按普通对话请求，因此不会因为非标准参数而失败。DeepSeek 与 GLM 发送 `thinking: {"type":"enabled"}`；Anthropic 发送原生的 `thinking` 配置和预算，并要求返回可展示的推理摘要。
+
+主动思考通常增加首 token 延迟和输出 token 成本。对于 DeepSeek 与 Anthropic，开启 Think 时服务端不会同时发送 `temperature`，以符合其 API 的兼容性要求。模型仍可能自行决定不返回思考内容；此时 `think` 为空，前端不会显示思考区。
+
+## 服务端 Tool Calling
+
+OpenAI-compatible Provider（OpenAI、Kimi、DeepSeek、GLM）在每次请求中携带已注册工具的 JSON Schema，并使用 `tool_choice: auto`。当模型流式返回 `tool_calls` 时，后端会完整拼接分片参数、校验工具白名单、在服务端执行工具，再将结果作为 `role: "tool"` 消息回传给模型，直到得到最终回答。
+
+当前默认注册 `calculator`，只支持数字、`+`、`-`、`*`、`/` 与括号，不会执行任意代码、Shell 命令或网络请求。新增工具只需在 `internal/tool` 实现 `Tool` 接口，并加入 `tool.NewDefaultRegistry`。
+
+`MAX_TOOL_ITERATIONS` 默认是 `4`，最多允许同一用户轮次内执行四轮工具调用；上限为 `10`，防止模型异常循环。工具调用的中间协议消息仅在当前模型轮次内保留，最终用户消息与 AI 最终回答仍会持久化到 PostgreSQL；后续可在审计/Trace 功能中扩展为完整工具调用记录。
+
 ## 设计要点与下一步
 
-`provider.Provider` 是核心扩展点。新增供应商只需实现 `ChatStream(ctx, request) <-chan StreamEvent`，然后在 `provider.NewRegistry` 注册；上层 HTTP 和数据库完全不用改。OpenAI 兼容协议的供应商只需新增一段配置。
+`provider.Provider` 是核心扩展点。新增供应商只需实现 `Chat(ctx, request) (ChatResponse, error)` 与 `ChatStream(ctx, request) <-chan StreamEvent`，然后在 `provider.NewRegistry` 注册；上层 HTTP 和数据库完全不用改。OpenAI 兼容协议的供应商只需新增一段配置。
 
 建议按这个顺序扩展：
 
-1. 增加 OpenAI tool calling，工具在服务端注册与执行。
-2. 增加文档上传、切分、embedding、pgvector 检索（RAG）。
-3. 为 Agent 增加循环上限、工具权限、审计和可观测 trace。
+1. 增加文档上传、切分、embedding、pgvector 检索（RAG）。
+2. 为 Agent 增加循环上限、工具权限、审计和可观测 trace。
 
 生产环境请使用强随机 `JWT_SECRET`、HTTPS、受限 CORS、密钥管理服务与数据库备份；目前的自动迁移适合作为学习与开发起点。

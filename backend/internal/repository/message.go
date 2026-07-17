@@ -14,7 +14,7 @@ import (
 type MessageRepository interface {
 	ListByConversationForUser(ctx context.Context, userID, conversationID string) ([]model.Message, error)
 	Create(ctx context.Context, message *model.Message) error
-	Finalize(ctx context.Context, id, content, status string, usage model.MessageUsage) (model.Message, error)
+	Finalize(ctx context.Context, id, content, think, status string, usage model.MessageUsage) (model.Message, error)
 }
 
 // GormMessageRepository is the PostgreSQL/GORM implementation of
@@ -39,7 +39,7 @@ func (r *GormMessageRepository) Create(ctx context.Context, message *model.Messa
 	return r.db.WithContext(ctx).Create(message).Error
 }
 
-func (r *GormMessageRepository) Finalize(ctx context.Context, id, content, status string, usage model.MessageUsage) (model.Message, error) {
+func (r *GormMessageRepository) Finalize(ctx context.Context, id, content, think, status string, usage model.MessageUsage) (model.Message, error) {
 	var item model.Message
 	err := r.db.WithContext(ctx).First(&item, "id = ?", id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -49,6 +49,7 @@ func (r *GormMessageRepository) Finalize(ctx context.Context, id, content, statu
 		return model.Message{}, err
 	}
 	item.Content = content
+	item.Think = think
 	item.Status = status
 	item.InputTokens = usage.InputTokens
 	item.OutputTokens = usage.OutputTokens

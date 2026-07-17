@@ -7,6 +7,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/example/agent-platform/backend/internal/service"
+	"github.com/example/agent-platform/backend/internal/tool"
 )
 
 // Server owns the HTTP dependencies. Route composition lives in router.go.
@@ -21,7 +22,10 @@ func NewServer(repositories *repository.Repositories, jwtManager *auth.JWTManage
 		handlers: handler.New(
 			service.NewAuth(repositories.Users, jwtManager),
 			service.NewConversation(repositories.Conversations, repositories.Messages),
-			service.NewChat(repositories, providers, cfg.SystemPrompt),
+			service.NewChat(repositories, providers, tool.NewDefaultRegistry(), cfg.MaxToolIterations, &provider.ThinkingConfig{
+				Enabled:      cfg.EnableThinking,
+				BudgetTokens: cfg.ThinkingBudgetTokens,
+			}, cfg.SystemPrompt),
 			service.NewCatalog(providers),
 		),
 		jwt:                jwtManager,

@@ -31,7 +31,7 @@ watch(() => props.providers, (providers) => {
 watch(models, (items) => {
   if (!items.includes(selectedModel.value)) selectedModel.value = items[0] || ''
 }, { immediate: true })
-watch(() => props.messages.map((item) => item.content).join(''), async () => {
+watch(() => props.messages.map((item) => `${item.content}\u0000${item.think ?? ''}`).join('\u0001'), async () => {
   await nextTick()
   viewport.value?.scrollTo({ top: viewport.value.scrollHeight, behavior: 'smooth' })
 })
@@ -74,6 +74,10 @@ function roleName(message: Message) { return message.role === 'user' ? '你' : m
       </section>
       <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
         <div class="message-meta"><span class="message-avatar" :class="{ agent: message.role !== 'user' }">{{ message.role === 'user' ? '你' : 'a' }}</span>{{ roleName(message) }}</div>
+        <details v-if="message.think" class="message-think" :open="message.status === 'streaming'">
+          <summary>思考过程</summary>
+          <div class="message-think-content">{{ message.think }}</div>
+        </details>
         <MarkdownContent :content="message.content" /><span v-if="message.status === 'streaming'" class="cursor" />
         <p v-if="message.status === 'error'" class="message-status">这次回答未能完成，请重试。</p>
       </article>

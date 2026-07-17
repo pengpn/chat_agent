@@ -24,7 +24,8 @@ func (h *Handler) CreateConversation(c *gin.Context) {
 	var input struct {
 		Title string `json:"title"`
 	}
-	if !decodeJSON(c, &input) {
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
 	conversation, err := h.conversations.Create(c.Request.Context(), currentUserID(c), input.Title)
@@ -50,7 +51,8 @@ func (h *Handler) UpdateConversation(c *gin.Context) {
 	var input struct {
 		Title string `json:"title"`
 	}
-	if !decodeJSON(c, &input) {
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
 	conversation, err := h.conversations.UpdateTitle(c.Request.Context(), currentUserID(c), c.Param("conversationID"), input.Title)

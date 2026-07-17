@@ -23,6 +23,7 @@ export interface Message {
   conversationId: string
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
+  think?: string
   provider?: string
   model?: string
   status: 'streaming' | 'complete' | 'stopped' | 'error'

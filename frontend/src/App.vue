@@ -122,6 +122,10 @@ async function send(content: string, provider: string, model: string) {
         messages.value = [...messages.value, userMessage, assistantMessage]
         setConversationTitleFromFirstMessage(content)
       },
+      onThink(delta) {
+        const latest = messages.value[messages.value.length - 1]
+        if (latest?.role === 'assistant') latest.think = (latest.think ?? '') + delta
+      },
       onDelta(delta) {
         const latest = messages.value[messages.value.length - 1]
         if (latest?.role === 'assistant') latest.content += delta

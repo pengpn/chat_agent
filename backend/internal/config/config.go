@@ -39,6 +39,9 @@ type Config struct {
 	JWTTTL                  time.Duration
 	CORSAllowedOrigins      []string
 	LogLevel                string
+	MaxToolIterations       int
+	EnableThinking          bool
+	ThinkingBudgetTokens    int
 	SystemPrompt            string
 	Providers               []ProviderConfig
 }
@@ -72,6 +75,24 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse DATABASE_CONN_MAX_IDLE_TIME: %w", err)
 	}
+	maxToolIterations, err := positiveIntEnv("MAX_TOOL_ITERATIONS", 4)
+	if err != nil {
+		return Config{}, err
+	}
+	if maxToolIterations > 10 {
+		return Config{}, fmt.Errorf("MAX_TOOL_ITERATIONS must not exceed 10")
+	}
+	enableThinking, err := boolEnv("ENABLE_THINKING", false)
+	if err != nil {
+		return Config{}, err
+	}
+	thinkingBudgetTokens, err := positiveIntEnv("THINKING_BUDGET_TOKENS", 2048)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := validateThinkingBudgetTokens(thinkingBudgetTokens); err != nil {
+		return Config{}, err
+	}
 
 	providers, err := configuredProviders()
 	if err != nil {
@@ -89,6 +110,9 @@ func Load() (Config, error) {
 		JWTTTL:                  ttl,
 		CORSAllowedOrigins:      splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
 		LogLevel:                env("LOG_LEVEL", "INFO"),
+		MaxToolIterations:       maxToolIterations,
+		EnableThinking:          enableThinking,
+		ThinkingBudgetTokens:    thinkingBudgetTokens,
 		SystemPrompt:            env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
 		Providers:               providers,
 	}
@@ -155,6 +179,15 @@ func positiveIntEnv(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
 	return parsed, nil
+}
+
+func validateThinkingBudgetTokens(value int) error {
+	// Anthropic requires at least 1024 thinking tokens and the current adapter
+	// uses max_tokens=4096, so keep the budget inside that supported range.
+	if value < 1024 || value >= 4096 {
+		return fmt.Errorf("THINKING_BUDGET_TOKENS must be between 1024 and 4095")
+	}
+	return nil
 }
 
 func boolEnv(key string, fallback bool) (bool, error) {

@@ -14,3 +14,16 @@ func TestParseModelPricing(t *testing.T) {
 		t.Fatal("expected invalid pricing to fail")
 	}
 }
+
+func TestValidateThinkingBudgetTokens(t *testing.T) {
+	for _, value := range []int{1024, 2048, 4095} {
+		if err := validateThinkingBudgetTokens(value); err != nil {
+			t.Errorf("validateThinkingBudgetTokens(%d) = %v", value, err)
+		}
+	}
+	for _, value := range []int{0, 1023, 4096} {
+		if err := validateThinkingBudgetTokens(value); err == nil {
+			t.Errorf("validateThinkingBudgetTokens(%d) unexpectedly succeeded", value)
+		}
+	}
+}

@@ -17,13 +17,13 @@ type Repositories struct {
 	Messages      MessageRepository
 }
 
-// ChatRepository groups the persistence operations required for a streamed
-// conversation turn.
+// ChatRepository groups the persistence operations required for a conversation
+// turn, whether it uses Chat or ChatStream.
 type ChatRepository interface {
 	FindByIDForUser(ctx context.Context, userID, id string) (model.Conversation, error)
 	ListByConversationForUser(ctx context.Context, userID, conversationID string) ([]model.Message, error)
 	CreateTurn(ctx context.Context, userMessage, assistantMessage *model.Message) error
-	Finalize(ctx context.Context, id, content, status string, usage model.MessageUsage) (model.Message, error)
+	Finalize(ctx context.Context, id, content, think, status string, usage model.MessageUsage) (model.Message, error)
 }
 
 func New(db *gorm.DB) *Repositories {
@@ -64,8 +64,8 @@ func (r *Repositories) ListByConversationForUser(ctx context.Context, userID, co
 	return r.Messages.ListByConversationForUser(ctx, userID, conversationID)
 }
 
-func (r *Repositories) Finalize(ctx context.Context, id, content, status string, usage model.MessageUsage) (model.Message, error) {
-	return r.Messages.Finalize(ctx, id, content, status, usage)
+func (r *Repositories) Finalize(ctx context.Context, id, content, think, status string, usage model.MessageUsage) (model.Message, error) {
+	return r.Messages.Finalize(ctx, id, content, think, status, usage)
 }
 
 func Migrate(ctx context.Context, db *gorm.DB) error {

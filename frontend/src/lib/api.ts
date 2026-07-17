@@ -87,8 +87,20 @@ export async function listMessages(conversationID: string): Promise<Message[]> {
   return (await request<{ messages: Message[] }>(`/api/v1/conversations/${conversationID}/messages`)).messages
 }
 
+export type ChatPayload = { content: string; provider: string; model: string; temperature?: number }
+
+// chatMessage is the non-streaming counterpart to streamMessage. It waits for
+// the full model result, including any model-provided reasoning in `think`.
+export async function chatMessage(conversationID: string, payload: ChatPayload): Promise<{ userMessage: Message; assistantMessage: Message }> {
+  return request<{ userMessage: Message; assistantMessage: Message }>(`/api/v1/conversations/${conversationID}/messages/chat`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })
+}
+
 type StreamHandlers = {
   onMetadata: (userMessage: Message, assistantMessage: Message) => void
+  onThink: (content: string) => void
   onDelta: (content: string) => void
   onDone: (message: Message) => void
   onError: (message: string) => void
@@ -96,7 +108,7 @@ type StreamHandlers = {
 
 export async function streamMessage(
   conversationID: string,
-  payload: { content: string; provider: string; model: string },
+  payload: ChatPayload,
   handlers: StreamHandlers,
   signal: AbortSignal
 ): Promise<void> {
@@ -127,6 +139,7 @@ export async function streamMessage(
       try {
         const data = JSON.parse(raw)
         if (event === 'metadata') handlers.onMetadata(data.userMessage, data.assistantMessage)
+        if (event === 'think') handlers.onThink(data.content)
         if (event === 'delta') handlers.onDelta(data.content)
         if (event === 'done') handlers.onDone(data.assistantMessage)
         if (event === 'error') handlers.onError(data.message)

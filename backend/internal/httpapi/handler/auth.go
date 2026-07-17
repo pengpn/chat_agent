@@ -12,7 +12,8 @@ import (
 
 func (h *Handler) Register(c *gin.Context) {
 	var input struct{ Email, Password, DisplayName string }
-	if !decodeJSON(c, &input) {
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
 	result, err := h.auth.Register(c.Request.Context(), service.RegisterInput{
@@ -39,7 +40,8 @@ func (h *Handler) Register(c *gin.Context) {
 
 func (h *Handler) Login(c *gin.Context) {
 	var input struct{ Email, Password string }
-	if !decodeJSON(c, &input) {
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
 	result, err := h.auth.Login(c.Request.Context(), service.LoginInput{Email: input.Email, Password: input.Password})

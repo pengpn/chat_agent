@@ -2,29 +2,78 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/example/agent-platform/backend/internal/config"
 )
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+}
+
+// ToolDefinition is the OpenAI-compatible function tool schema sent to a
+// model. Tool execution itself always remains in the service process.
+type ToolDefinition struct {
+	Type     string                 `json:"type"`
+	Function ToolFunctionDefinition `json:"function"`
+}
+
+type ToolFunctionDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// ToolCall is a function invocation requested by a model.
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolFunctionCall `json:"function"`
+}
+
+type ToolFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type ChatRequest struct {
 	Model       string
 	Messages    []Message
+	Tools       []ToolDefinition
+	Thinking    *ThinkingConfig
 	Temperature *float64
 }
 
+// ThinkingConfig requests model reasoning when the selected Provider and model
+// support it. BudgetTokens is currently used by Anthropic's native API.
+type ThinkingConfig struct {
+	Enabled      bool
+	BudgetTokens int
+}
+
+// ChatResponse is the complete, non-streaming model result.
+type ChatResponse struct {
+	Content   string
+	Think     string
+	ToolCalls []ToolCall
+	Usage     *TokenUsage
+}
+
 type StreamEvent struct {
-	Delta string
-	Usage *TokenUsage
-	Done  bool
-	Err   error
+	Delta      string
+	ThinkDelta string
+	ToolCalls  []ToolCall
+	Usage      *TokenUsage
+	Done       bool
+	Err        error
 }
 
 // TokenUsage contains token counts reported by a model API. Counts are merged
@@ -44,8 +93,31 @@ func (u *TokenUsage) Merge(other TokenUsage) {
 	}
 }
 
+// Add aggregates usage across separate model requests, such as the requests
+// made before and after a tool invocation.
+func (u *TokenUsage) Add(other TokenUsage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	if other.TotalTokens > 0 {
+		u.TotalTokens += other.TotalTokens
+	} else {
+		u.TotalTokens += other.InputTokens + other.OutputTokens
+	}
+}
+
 type Provider interface {
+	Chat(ctx context.Context, request ChatRequest) (ChatResponse, error)
 	ChatStream(ctx context.Context, request ChatRequest) <-chan StreamEvent
+}
+
+// Resolver supplies the configured Provider and its protocol capabilities to
+// the chat service. Keeping this as an interface lets service tests drive the
+// tool loop without a real model endpoint.
+type Resolver interface {
+	Get(id, model string) (Provider, error)
+	SupportsTools(id string) bool
+	SupportsThinking(id, model string) bool
+	CalculateCost(providerID, model string, usage TokenUsage) (int64, bool)
 }
 
 type PublicProvider struct {
@@ -92,6 +164,36 @@ func (r *Registry) Get(id, model string) (Provider, error) {
 		}
 	}
 	return nil, fmt.Errorf("model %q is not enabled for provider %q", model, id)
+}
+
+// SupportsTools reports whether the configured provider accepts the OpenAI
+// function-calling request and response schema.
+func (r *Registry) SupportsTools(id string) bool {
+	cfg, ok := r.configs[id]
+	return ok && cfg.Type == "openai-compatible"
+}
+
+// SupportsThinking reports whether the Provider can be asked to return
+// reasoning with this model. It deliberately excludes generic OpenAI and Kimi
+// requests: they do not share a safe, standard thinking request parameter.
+func (r *Registry) SupportsThinking(id, model string) bool {
+	cfg, ok := r.configs[id]
+	if !ok {
+		return false
+	}
+	switch cfg.ID {
+	case "deepseek":
+		return strings.HasPrefix(model, "deepseek-v4-")
+	case "glm":
+		return strings.HasPrefix(model, "glm-5") ||
+			strings.HasPrefix(model, "glm-4.7") ||
+			strings.HasPrefix(model, "glm-4.6") ||
+			strings.HasPrefix(model, "glm-4.5")
+	case "anthropic":
+		return strings.Contains(model, "sonnet") || strings.Contains(model, "opus")
+	default:
+		return false
+	}
 }
 
 func (r *Registry) Public() []PublicProvider {

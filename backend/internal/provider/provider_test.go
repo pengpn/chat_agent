@@ -20,6 +20,7 @@ func TestOpenAICompatibleStreamsContent(t *testing.T) {
 			t.Fatalf("authorization header was not set")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先理解问题。\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"世界\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
@@ -27,9 +28,16 @@ func TestOpenAICompatibleStreamsContent(t *testing.T) {
 	defer server.Close()
 
 	client := &openAICompatible{baseURL: server.URL, apiKey: "test-key", client: server.Client()}
-	result := collect(client.ChatStream(context.Background(), ChatRequest{Model: "demo", Messages: []Message{{Role: "user", Content: "hi"}}}))
-	if result != "你好世界" {
-		t.Fatalf("streamed result = %q, want %q", result, "你好世界")
+	var content, think strings.Builder
+	for event := range client.ChatStream(context.Background(), ChatRequest{Model: "demo", Messages: []Message{{Role: "user", Content: "hi"}}}) {
+		if event.Err != nil {
+			t.Fatal(event.Err)
+		}
+		content.WriteString(event.Delta)
+		think.WriteString(event.ThinkDelta)
+	}
+	if content.String() != "你好世界" || think.String() != "先理解问题。" {
+		t.Fatalf("content=%q think=%q", content.String(), think.String())
 	}
 }
 
@@ -64,6 +72,147 @@ func TestOpenAICompatibleReportsUsage(t *testing.T) {
 	}
 	if usage == nil || usage.InputTokens != 12 || usage.OutputTokens != 7 || usage.TotalTokens != 19 {
 		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestOpenAICompatibleChatReturnsCompleteResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if _, streaming := request["stream"]; streaming {
+			t.Fatal("non-streaming chat unexpectedly included stream")
+		}
+		if request["tool_choice"] != "auto" {
+			t.Fatalf("tool_choice = %#v", request["tool_choice"])
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"最终答案","reasoning_content":"先分析问题。","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calculator","arguments":"{\"expression\":\"2+2\"}"}}]}}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`))
+	}))
+	defer server.Close()
+
+	client := &openAICompatible{baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	result, err := client.Chat(context.Background(), ChatRequest{
+		Model:    "demo",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Tools:    []ToolDefinition{{Type: "function", Function: ToolFunctionDefinition{Name: "calculator"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "最终答案" || result.Think != "先分析问题。" || len(result.ToolCalls) != 1 || result.ToolCalls[0].Function.Name != "calculator" {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 12 || result.Usage.OutputTokens != 7 || result.Usage.TotalTokens != 19 {
+		t.Fatalf("usage = %#v", result.Usage)
+	}
+}
+
+func TestDeepSeekChatEnablesThinkingAndOmitsTemperature(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Thinking *struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
+			Temperature *float64 `json:"temperature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Thinking == nil || request.Thinking.Type != "enabled" {
+			t.Fatalf("thinking = %#v", request.Thinking)
+		}
+		if request.Temperature != nil {
+			t.Fatalf("temperature = %v, want omitted", *request.Temperature)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"答案","reasoning_content":"推理"}}]}`))
+	}))
+	defer server.Close()
+
+	temperature := 0.7
+	client := &openAICompatible{providerID: "deepseek", baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	result, err := client.Chat(context.Background(), ChatRequest{
+		Model:       "deepseek-v4-flash",
+		Messages:    []Message{{Role: "user", Content: "hi"}},
+		Thinking:    &ThinkingConfig{Enabled: true, BudgetTokens: 2048},
+		Temperature: &temperature,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Think != "推理" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestDeepSeekStreamEnablesThinking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Stream   bool `json:"stream"`
+			Thinking *struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if !request.Stream || request.Thinking == nil || request.Thinking.Type != "enabled" {
+			t.Fatalf("request = %#v", request)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := &openAICompatible{providerID: "deepseek", baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	for event := range client.ChatStream(context.Background(), ChatRequest{
+		Model:    "deepseek-v4-flash",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Thinking: &ThinkingConfig{Enabled: true, BudgetTokens: 2048},
+	}) {
+		if event.Err != nil {
+			t.Fatal(event.Err)
+		}
+	}
+}
+
+func TestOpenAICompatibleStreamsToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Tools      []ToolDefinition `json:"tools"`
+			ToolChoice string           `json:"tool_choice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ToolChoice != "auto" || len(request.Tools) != 1 || request.Tools[0].Function.Name != "calculator" {
+			t.Fatalf("tool request = %#v", request)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"calculator\",\"arguments\":\"{\\\"expression\\\":\\\"2+\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"2\\\"}\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := &openAICompatible{baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	events := client.ChatStream(context.Background(), ChatRequest{
+		Model:    "demo",
+		Messages: []Message{{Role: "user", Content: "calculate 2+2"}},
+		Tools:    []ToolDefinition{{Type: "function", Function: ToolFunctionDefinition{Name: "calculator"}}},
+	})
+	var calls []ToolCall
+	for event := range events {
+		if event.Err != nil {
+			t.Fatal(event.Err)
+		}
+		calls = append(calls, event.ToolCalls...)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %#v", calls)
+	}
+	if calls[0].ID != "call_1" || calls[0].Function.Name != "calculator" || calls[0].Function.Arguments != `{"expression":"2+2"}` {
+		t.Fatalf("tool call = %#v", calls[0])
 	}
 }
 
@@ -123,6 +272,74 @@ func TestAnthropicReportsUsageAcrossStreamEvents(t *testing.T) {
 	}
 	if usage.InputTokens != 10 || usage.OutputTokens != 5 || usage.TotalTokens != 15 {
 		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestAnthropicChatReturnsContentAndThinking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			System      string             `json:"system"`
+			Messages    []Message          `json:"messages"`
+			Thinking    *anthropicThinking `json:"thinking"`
+			Temperature *float64           `json:"temperature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.System != "be concise" || len(request.Messages) != 1 || request.Messages[0].Role != "user" {
+			t.Fatalf("request = %#v", request)
+		}
+		if request.Thinking == nil || request.Thinking.Type != "enabled" || request.Thinking.BudgetTokens != 2048 || request.Thinking.Display != "summarized" {
+			t.Fatalf("thinking = %#v", request.Thinking)
+		}
+		if request.Temperature != nil {
+			t.Fatalf("temperature = %v, want omitted", *request.Temperature)
+		}
+		_, _ = w.Write([]byte(`{"content":[{"type":"thinking","thinking":"先检查上下文。"},{"type":"text","text":"这是答案。"}],"usage":{"input_tokens":10,"output_tokens":5}}`))
+	}))
+	defer server.Close()
+
+	client := &anthropic{baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	temperature := 0.7
+	result, err := client.Chat(context.Background(), ChatRequest{
+		Model:       "demo",
+		Messages:    []Message{{Role: "system", Content: "be concise"}, {Role: "user", Content: "hi"}},
+		Thinking:    &ThinkingConfig{Enabled: true, BudgetTokens: 2048},
+		Temperature: &temperature,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "这是答案。" || result.Think != "先检查上下文。" {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 5 || result.Usage.TotalTokens != 15 {
+		t.Fatalf("usage = %#v", result.Usage)
+	}
+}
+
+func TestRegistrySupportsThinkingOnlyForCompatibleModels(t *testing.T) {
+	registry := NewRegistry([]config.ProviderConfig{
+		{ID: "openai", Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key", Models: []string{"gpt-4o"}},
+		{ID: "deepseek", Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key", Models: []string{"deepseek-v4-flash"}},
+		{ID: "glm", Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key", Models: []string{"glm-4.5"}},
+		{ID: "anthropic", Type: "anthropic", BaseURL: "https://example.com", APIKey: "key", Models: []string{"claude-sonnet"}},
+	})
+	for _, candidate := range []struct {
+		provider string
+		model    string
+		want     bool
+	}{
+		{"openai", "gpt-4o", false},
+		{"deepseek", "deepseek-v4-flash", true},
+		{"deepseek", "deepseek-chat", false},
+		{"glm", "glm-4.5", true},
+		{"glm", "glm-4-flash", false},
+		{"anthropic", "claude-sonnet", true},
+	} {
+		if got := registry.SupportsThinking(candidate.provider, candidate.model); got != candidate.want {
+			t.Errorf("SupportsThinking(%q, %q) = %t, want %t", candidate.provider, candidate.model, got, candidate.want)
+		}
 	}
 }
 
