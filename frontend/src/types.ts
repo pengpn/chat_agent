@@ -26,7 +26,8 @@ export interface Message {
   think?: string
   provider?: string
   model?: string
-  status: 'streaming' | 'complete' | 'stopped' | 'error'
+	status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error'
+	finishReason?: string
   createdAt: string
 }
 

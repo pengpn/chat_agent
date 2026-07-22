@@ -12,7 +12,8 @@ type Message struct {
 	Think          string        `json:"think,omitempty" gorm:"type:text;not null;default:''"`
 	Provider       string        `json:"provider,omitempty" gorm:"type:text"`
 	Model          string        `json:"model,omitempty" gorm:"type:text"`
-	Status         string        `json:"status" gorm:"type:text;not null;default:complete;check:messages_status_check,status IN ('streaming', 'complete', 'stopped', 'error')"`
+	Status         string        `json:"status" gorm:"type:text;not null;default:complete;check:messages_status_check,status IN ('streaming', 'complete', 'stopped', 'interrupted', 'error')"`
+	FinishReason   string        `json:"finishReason,omitempty" gorm:"type:text;not null;default:''"`
 	InputTokens    int64         `json:"inputTokens" gorm:"not null;default:0"`
 	OutputTokens   int64         `json:"outputTokens" gorm:"not null;default:0"`
 	TotalTokens    int64         `json:"totalTokens" gorm:"not null;default:0"`
@@ -21,6 +22,14 @@ type Message struct {
 	CostKnown      bool          `json:"costKnown" gorm:"not null;default:false"`
 	CreatedAt      time.Time     `json:"createdAt" gorm:"index:messages_conversation_created_idx,priority:2"`
 	UpdatedAt      time.Time     `json:"-"`
+}
+
+type MessageCompletion struct {
+	Content      string
+	Think        string
+	Status       string
+	FinishReason string
+	Usage        MessageUsage
 }
 
 // MessageUsage is the final accounting data saved with an assistant message.

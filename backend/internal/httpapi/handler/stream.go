@@ -1,10 +1,11 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/httpapi/response"
@@ -30,27 +31,105 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
 	c.Status(http.StatusOK)
-	writeSSE(c.Writer, flusher, "metadata", gin.H{"userMessage": session.UserMessage, "assistantMessage": session.AssistantMessage})
+	messageID := session.AssistantMessage.ID
+	h.streams.Start(messageID, currentUserID(c))
+	h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "metadata", map[string]any{
+		"userMessage": session.UserMessage, "assistantMessage": session.AssistantMessage,
+	}, false)
 
+	var modelErr error
 	completed, status, err := h.chat.Stream(c.Request.Context(), session, func(event provider.StreamEvent) {
 		if event.Err != nil {
-			writeSSE(c.Writer, flusher, "error", gin.H{"message": "模型调用失败：" + safeError(event.Err)})
+			modelErr = event.Err
 			return
 		}
 		if event.ThinkDelta != "" {
-			writeSSE(c.Writer, flusher, "think", gin.H{"content": event.ThinkDelta})
+			h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "think", map[string]any{"content": event.ThinkDelta}, false)
 		}
 		if event.Delta != "" {
-			writeSSE(c.Writer, flusher, "delta", gin.H{"content": event.Delta})
+			h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "delta", map[string]any{"content": event.Delta}, false)
 		}
 	})
 	if err != nil {
 		logger.Error(c.Request.Context(), "finalize streamed message failed", logger.Err(err))
+		h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "error", map[string]any{"message": "保存消息终态失败"}, true)
 		return
 	}
 	h.logChatCompleted(c, completed, status)
-	if status == "complete" {
-		writeSSE(c.Writer, flusher, "done", gin.H{"assistantMessage": completed})
+	switch status {
+	case "complete":
+		h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "done", map[string]any{"assistantMessage": completed}, true)
+	case "stopped", "interrupted":
+		h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "interrupted", map[string]any{
+			"assistantMessage": completed, "reason": completed.FinishReason,
+		}, true)
+	default:
+		message := "模型调用失败"
+		if modelErr != nil {
+			message += "：" + safeError(modelErr)
+		}
+		h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "error", map[string]any{
+			"message": message, "assistantMessage": completed,
+		}, true)
+	}
+}
+
+func (h *Handler) ResumeMessageStream(c *gin.Context) {
+	afterValue := c.Query("afterSequence")
+	if afterValue == "" {
+		afterValue = c.GetHeader("Last-Event-ID")
+	}
+	if afterValue == "" {
+		afterValue = "0"
+	}
+	after, err := strconv.ParseInt(afterValue, 10, 64)
+	if err != nil || after < 0 {
+		response.WriteErrorResp(c, http.StatusBadRequest, "afterSequence 必须是非负整数")
+		return
+	}
+	messageID := c.Param("messageID")
+	snapshot := h.streams.Snapshot(messageID, currentUserID(c), after)
+	if !snapshot.Found {
+		response.WriteErrorResp(c, http.StatusNotFound, "流式缓存不存在或已过期")
+		return
+	}
+	if snapshot.Gap {
+		response.WriteErrorResp(c, http.StatusConflict, "流式缓存片段已过期，请重新加载消息")
+		return
+	}
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器不支持流式响应")
+		return
+	}
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+
+	for {
+		for _, event := range snapshot.Events {
+			writeCachedSSE(c.Writer, flusher, event.Sequence, event.Name, event.Data)
+			after = event.Sequence
+		}
+		snapshot.Events = nil
+		if snapshot.Terminal {
+			return
+		}
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-snapshot.Wait:
+			snapshot = h.streams.Snapshot(messageID, currentUserID(c), after)
+			if !snapshot.Found || snapshot.Gap {
+				return
+			}
+		case <-keepalive.C:
+			_, _ = fmt.Fprint(c.Writer, ": keepalive\n\n")
+			flusher.Flush()
+		}
 	}
 }
 
@@ -117,6 +196,7 @@ func (h *Handler) logChatCompleted(c *gin.Context, completed model.Message, stat
 		logger.String("provider", completed.Provider),
 		logger.String("model", completed.Model),
 		logger.String("status", status),
+		logger.String("finish_reason", completed.FinishReason),
 		logger.Int64("input_tokens", completed.InputTokens),
 		logger.Int64("output_tokens", completed.OutputTokens),
 		logger.Int64("total_tokens", completed.TotalTokens),
@@ -126,8 +206,18 @@ func (h *Handler) logChatCompleted(c *gin.Context, completed model.Message, stat
 	)
 }
 
-func writeSSE(w http.ResponseWriter, flusher http.Flusher, name string, payload any) {
-	data, _ := json.Marshal(payload)
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data)
+// 做两件事：先缓存，再推给当前客户端
+func (h *Handler) appendAndWriteStreamEvent(w http.ResponseWriter, flusher http.Flusher, messageID, name string, payload map[string]any, terminal bool) {
+	// 写入 streamcache，分配递增 sequence，带上 messageId，并标记是否终态（done / error / interrupted 时 terminal=true）。这样断线后可通过 ResumeMessageStream 按 afterSequence 续传
+	event, ok := h.streams.Append(messageID, name, payload, terminal)
+	if !ok {
+		return
+	}
+	//把同一条事件写成 SSE（id / event / data）并 Flush，当前连接立刻收到。
+	writeCachedSSE(w, flusher, event.Sequence, event.Name, event.Data)
+}
+
+func writeCachedSSE(w http.ResponseWriter, flusher http.Flusher, sequence int64, name string, data []byte) {
+	_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", sequence, name, data)
 	flusher.Flush()
 }

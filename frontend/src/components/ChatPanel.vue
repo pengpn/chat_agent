@@ -9,6 +9,7 @@ const props = defineProps<{
   providers: ModelProvider[]
   pending: boolean
   error: string
+  notice: string
 }>()
 
 const emit = defineEmits<{
@@ -79,11 +80,13 @@ function roleName(message: Message) { return message.role === 'user' ? '你' : m
           <div class="message-think-content">{{ message.think }}</div>
         </details>
         <MarkdownContent :content="message.content" /><span v-if="message.status === 'streaming'" class="cursor" />
+		<p v-if="message.status === 'interrupted'" class="message-status">回答已中断，可重新生成。</p>
         <p v-if="message.status === 'error'" class="message-status">这次回答未能完成，请重试。</p>
       </article>
     </div>
 
     <footer class="composer-wrap">
+      <p v-if="notice" class="stream-notice">{{ notice }}</p>
       <p v-if="error" class="stream-error">{{ error }}</p>
       <div v-if="!providers.length" class="configuration-notice">当前工作空间暂未配置可用模型，请联系工作空间管理员。</div>
       <div class="composer" :class="{ disabled: !conversation || !providers.length }">

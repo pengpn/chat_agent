@@ -18,6 +18,7 @@ type ProviderConfig struct {
 	Models             []string                `json:"models"`
 	StreamIncludeUsage bool                    `json:"-"`
 	ModelPricing       map[string]ModelPricing `json:"-"`
+	ConnectTimeout     time.Duration           `json:"-"`
 }
 
 // ModelPricing uses USD per one million tokens. It intentionally lives in
@@ -40,6 +41,11 @@ type Config struct {
 	CORSAllowedOrigins      []string
 	LogLevel                string
 	MaxToolIterations       int
+	StreamConnectTimeout    time.Duration
+	StreamTTFTTimeout       time.Duration
+	StreamTotalTimeout      time.Duration
+	StreamCacheTTL          time.Duration
+	StreamCacheMaxEvents    int
 	EnableThinking          bool
 	ThinkingBudgetTokens    int
 	SystemPrompt            string
@@ -82,6 +88,26 @@ func Load() (Config, error) {
 	if maxToolIterations > 10 {
 		return Config{}, fmt.Errorf("MAX_TOOL_ITERATIONS must not exceed 10")
 	}
+	streamConnectTimeout, err := positiveDurationEnv("STREAM_CONNECT_TIMEOUT", "10s")
+	if err != nil {
+		return Config{}, err
+	}
+	streamTTFTTimeout, err := positiveDurationEnv("STREAM_TTFT_TIMEOUT", "30s")
+	if err != nil {
+		return Config{}, err
+	}
+	streamTotalTimeout, err := positiveDurationEnv("STREAM_TOTAL_TIMEOUT", "5m")
+	if err != nil {
+		return Config{}, err
+	}
+	streamCacheTTL, err := positiveDurationEnv("STREAM_CACHE_TTL", "5m")
+	if err != nil {
+		return Config{}, err
+	}
+	streamCacheMaxEvents, err := positiveIntEnv("STREAM_CACHE_MAX_EVENTS", 10_000)
+	if err != nil {
+		return Config{}, err
+	}
 	enableThinking, err := boolEnv("ENABLE_THINKING", false)
 	if err != nil {
 		return Config{}, err
@@ -94,7 +120,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	providers, err := configuredProviders()
+	providers, err := configuredProviders(streamConnectTimeout)
 	if err != nil {
 		return Config{}, err
 	}
@@ -111,6 +137,11 @@ func Load() (Config, error) {
 		CORSAllowedOrigins:      splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
 		LogLevel:                env("LOG_LEVEL", "INFO"),
 		MaxToolIterations:       maxToolIterations,
+		StreamConnectTimeout:    streamConnectTimeout,
+		StreamTTFTTimeout:       streamTTFTTimeout,
+		StreamTotalTimeout:      streamTotalTimeout,
+		StreamCacheTTL:          streamCacheTTL,
+		StreamCacheMaxEvents:    streamCacheMaxEvents,
 		EnableThinking:          enableThinking,
 		ThinkingBudgetTokens:    thinkingBudgetTokens,
 		SystemPrompt:            env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
@@ -130,7 +161,7 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-func configuredProviders() ([]ProviderConfig, error) {
+func configuredProviders(connectTimeout time.Duration) ([]ProviderConfig, error) {
 	type providerDefinition struct {
 		id, label, kind, prefix, baseURL, models string
 	}
@@ -160,6 +191,7 @@ func configuredProviders() ([]ProviderConfig, error) {
 			Models:             splitCSV(env(definition.prefix+"_MODELS", definition.models)),
 			StreamIncludeUsage: includeUsage,
 			ModelPricing:       pricing,
+			ConnectTimeout:     connectTimeout,
 		})
 	}
 	return result, nil
@@ -177,6 +209,15 @@ func positiveIntEnv(key string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+func positiveDurationEnv(key, fallback string) (time.Duration, error) {
+	value := env(key, fallback)
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", key)
 	}
 	return parsed, nil
 }

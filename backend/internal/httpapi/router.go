@@ -28,6 +28,7 @@ func (s *Server) Router() http.Handler {
 	protected.DELETE("/conversations/:conversationID", s.handlers.DeleteConversation)
 	protected.POST("/conversations/:conversationID/messages/chat", s.handlers.ChatMessage)
 	protected.POST("/conversations/:conversationID/messages", s.handlers.StreamMessage)
+	protected.GET("/messages/:messageID/stream", s.handlers.ResumeMessageStream)
 
 	return engine
 }

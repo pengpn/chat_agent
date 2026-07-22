@@ -83,8 +83,20 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 | GET | `/api/v1/conversations/:id/messages` | 获取消息历史 |
 | POST | `/api/v1/conversations/:id/messages` | SSE 流式发送消息 |
 | POST | `/api/v1/conversations/:id/messages/chat` | 非流式发送消息，返回完整结果 |
+| GET | `/api/v1/messages/:messageId/stream?afterSequence=N` | 按序号补发短期缓存中的 SSE 片段 |
 
-流式接口依次发送 `metadata`、多个 `think`（模型思考增量）、多个 `delta`（最终回答增量）、最后的 `done` 事件；发生错误时发送 `error`。客户端中断连接会保留已生成的内容，并将消息状态标记为 `stopped`。
+流式接口依次发送 `metadata`、多个 `think`（模型思考增量）、多个 `delta`（最终回答增量）、最后的 `done` 事件。每个事件都携带 `messageId`、递增 `sequence`，并使用同值的 SSE `id` 字段。非正常终止发送 `interrupted` 或 `error`。
+
+流式异常按四类处理：
+
+- 用户取消：点击停止、删除正在生成的会话、退出或页面连接关闭都会触发 `AbortController` / `request.Context()`，逐层取消供应商请求、响应解析和工具调用。切换或新建会话不会取消原会话，原输出会在后台继续。除带严格 5 秒上限的消息终态写入外，不再启动后续任务；
+- 超时：`STREAM_CONNECT_TIMEOUT` 分别约束 TCP 连接、TLS 握手和响应头；`STREAM_TTFT_TIMEOUT` 从供应商 HTTP 成功响应到首个协议事件；`STREAM_TOTAL_TIMEOUT` 约束整个模型及工具轮次。日志和 `finishReason` 分别记录 `connect_timeout`、`ttft_timeout`、`total_timeout`；
+- 断流：OpenAI-compatible 必须收到 `[DONE]`，Anthropic 必须收到 `message_stop`。缺少结束标记时消息保存为 `interrupted`，保留半截内容但不会当作成功回答；正常结束会持久化供应商的 `finish_reason`；
+- 重连：不会重新调用供应商并假装 Token 级续传。服务端按 `messageId` 缓存最近事件，前端断线后携带最后 `sequence` 请求补发。缓存默认保留 5 分钟；缓存缺口或过期时提示重新加载/生成。
+
+供应商流一旦失效不会自动重放模型请求，因此不会因为所谓“重连”产生第二笔模型调用和重复 token 费用。客户端补发仅重放本服务已经缓存的 SSE 事件。
+
+当前短期缓存是单进程内存实现，适合本地学习和单实例部署。多实例生产环境应替换为 Redis Stream 等共享存储，并让重连请求按 `messageId` 访问同一份事件序列。
 
 非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 

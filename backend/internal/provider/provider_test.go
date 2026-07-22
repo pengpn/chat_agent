@@ -22,22 +22,46 @@ func TestOpenAICompatibleStreamsContent(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先理解问题。\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n"))
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"世界\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"世界\"},\"finish_reason\":\"stop\"}]}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
 
 	client := &openAICompatible{baseURL: server.URL, apiKey: "test-key", client: server.Client()}
 	var content, think strings.Builder
+	finishReason := ""
 	for event := range client.ChatStream(context.Background(), ChatRequest{Model: "demo", Messages: []Message{{Role: "user", Content: "hi"}}}) {
 		if event.Err != nil {
 			t.Fatal(event.Err)
 		}
 		content.WriteString(event.Delta)
 		think.WriteString(event.ThinkDelta)
+		if event.Done {
+			finishReason = event.FinishReason
+		}
 	}
-	if content.String() != "你好世界" || think.String() != "先理解问题。" {
-		t.Fatalf("content=%q think=%q", content.String(), think.String())
+	if content.String() != "你好世界" || think.String() != "先理解问题。" || finishReason != "stop" {
+		t.Fatalf("content=%q think=%q finishReason=%q", content.String(), think.String(), finishReason)
+	}
+}
+
+func TestOpenAICompatibleTreatsMissingDoneAsDisconnect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+	}))
+	defer server.Close()
+
+	client := &openAICompatible{baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	var streamErr error
+	for event := range client.ChatStream(context.Background(), ChatRequest{Model: "demo", Messages: []Message{{Role: "user", Content: "hi"}}}) {
+		if event.Err != nil {
+			streamErr = event.Err
+		}
+	}
+	kind := StreamErrorKindOf(streamErr)
+	if kind != StreamErrorDisconnected {
+		t.Fatalf("kind=%q err=%v", kind, streamErr)
 	}
 }
 

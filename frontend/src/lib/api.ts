@@ -102,8 +102,16 @@ type StreamHandlers = {
   onMetadata: (userMessage: Message, assistantMessage: Message) => void
   onThink: (content: string) => void
   onDelta: (content: string) => void
+  onReconnect: (attempt: number, maxRetries: number) => void
   onDone: (message: Message) => void
-  onError: (message: string) => void
+  onInterrupted: (message: Message, reason: string) => void
+  onError: (message: string, assistantMessage?: Message) => void
+}
+
+type StreamState = {
+	messageID: string
+	lastSequence: number
+	terminal: boolean
 }
 
 export async function streamMessage(
@@ -122,7 +130,40 @@ export async function streamMessage(
     const body = await response.json().catch(() => ({ msg: `请求失败 (${response.status})` })) as Partial<ApiResponse<unknown>>
     throw new Error(body.msg || `请求失败 (${response.status})`)
   }
+	const state: StreamState = { messageID: '', lastSequence: 0, terminal: false }
+	try {
+		await consumeEventStream(response, handlers, state, signal)
+	} catch (cause) {
+		if (signal.aborted || !state.messageID) throw cause
+	}
+	if (state.terminal || signal.aborted) return
 
+	const maxReconnects = 3
+	let lastError: unknown = new Error('与服务器的流式连接意外中断')
+	for (let attempt = 1; attempt <= maxReconnects && !signal.aborted; attempt++) {
+		handlers.onReconnect(attempt, maxReconnects)
+		if (attempt > 1) await abortableDelay(500 * 2 ** (attempt - 2), signal)
+		try {
+			const resumed = await fetch(`/api/v1/messages/${state.messageID}/stream?afterSequence=${state.lastSequence}`, {
+				headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+				signal
+			})
+			if (!resumed.ok || !resumed.body) {
+				const body = await resumed.json().catch(() => ({ msg: `重连失败 (${resumed.status})` })) as Partial<ApiResponse<unknown>>
+				throw new Error(body.msg || `重连失败 (${resumed.status})`)
+			}
+			await consumeEventStream(resumed, handlers, state, signal)
+			if (state.terminal) return
+		} catch (cause) {
+			if (signal.aborted) return
+			lastError = cause
+		}
+	}
+	throw lastError
+}
+
+async function consumeEventStream(response: Response, handlers: StreamHandlers, state: StreamState, signal: AbortSignal): Promise<void> {
+	if (!response.body) throw new Error('服务器未返回流式响应')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -138,14 +179,37 @@ export async function streamMessage(
       if (!event || !raw) continue
       try {
         const data = JSON.parse(raw)
+		state.messageID = data.messageId || state.messageID
+		state.lastSequence = Math.max(state.lastSequence, Number(data.sequence) || 0)
         if (event === 'metadata') handlers.onMetadata(data.userMessage, data.assistantMessage)
         if (event === 'think') handlers.onThink(data.content)
         if (event === 'delta') handlers.onDelta(data.content)
-        if (event === 'done') handlers.onDone(data.assistantMessage)
-        if (event === 'error') handlers.onError(data.message)
+        if (event === 'done') {
+		  state.terminal = true
+          handlers.onDone(data.assistantMessage)
+        }
+		if (event === 'interrupted') {
+		  state.terminal = true
+		  handlers.onInterrupted(data.assistantMessage, data.reason)
+		}
+        if (event === 'error') {
+		  state.terminal = true
+          handlers.onError(data.message, data.assistantMessage)
+        }
       } catch {
         handlers.onError('无法解析模型返回的数据')
       }
     }
   }
+	if (!state.terminal && !signal.aborted) throw new Error('与服务器的流式连接意外中断')
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const timer = window.setTimeout(resolve, ms)
+		signal.addEventListener('abort', () => {
+			window.clearTimeout(timer)
+			reject(new DOMException('Aborted', 'AbortError'))
+		}, { once: true })
+	})
 }

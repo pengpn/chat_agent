@@ -68,12 +68,15 @@ type ChatResponse struct {
 }
 
 type StreamEvent struct {
-	Delta      string
-	ThinkDelta string
-	ToolCalls  []ToolCall
-	Usage      *TokenUsage
-	Done       bool
-	Err        error
+	Delta        string      // 最终回答文本增量
+	ThinkDelta   string      // 思考内容增量
+	ToolCalls    []ToolCall  // 模型请求的工具调用
+	Usage        *TokenUsage // token 用量
+	Connected    bool        // 已收到供应商的成功 HTTP 响应头
+	Activity     bool        // 已收到供应商的首个协议事件
+	Done         bool        // 当前模型请求正常结束
+	FinishReason string      // 供应商报告的结束原因
+	Err          error       // 当前请求失败
 }
 
 // TokenUsage contains token counts reported by a model API. Counts are merged

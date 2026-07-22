@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/example/agent-platform/backend/internal/config"
 )
@@ -29,7 +28,7 @@ type anthropicThinking struct {
 }
 
 func NewAnthropic(cfg config.ProviderConfig) Provider {
-	return &anthropic{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, client: &http.Client{Timeout: 10 * time.Minute}}
+	return &anthropic{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, client: newHTTPClient(cfg.ConnectTimeout)}
 }
 
 func (p *anthropic) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
@@ -147,30 +146,38 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 
 		response, err := p.client.Do(httpRequest)
 		if err != nil {
-			sendEvent(ctx, events, StreamEvent{Err: err})
+			sendEvent(ctx, events, StreamEvent{Err: ClassifyConnectError(ctx, err)})
 			return
 		}
 		defer response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			message, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-			sendEvent(ctx, events, StreamEvent{Err: fmt.Errorf("Anthropic API returned %s: %s", response.Status, strings.TrimSpace(string(message)))})
+			err := fmt.Errorf("Anthropic API returned %s: %s", response.Status, strings.TrimSpace(string(message)))
+			sendEvent(ctx, events, StreamEvent{Err: NewStreamError(StreamErrorUpstream, err)})
 			return
 		}
+		sendEvent(ctx, events, StreamEvent{Connected: true})
 
 		scanner := bufio.NewScanner(response.Body)
 		scanner.Buffer(make([]byte, 0, 64<<10), 2<<20)
+		finishReason := ""
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "" {
+				continue
+			}
+			sendEvent(ctx, events, StreamEvent{Activity: true})
 			var chunk struct {
 				Type  string `json:"type"`
 				Delta struct {
-					Type     string `json:"type"`
-					Text     string `json:"text"`
-					Thinking string `json:"thinking"`
+					Type       string `json:"type"`
+					Text       string `json:"text"`
+					Thinking   string `json:"thinking"`
+					StopReason string `json:"stop_reason"`
 				} `json:"delta"`
 				Message struct {
 					Usage struct {
@@ -198,9 +205,12 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 					sendEvent(ctx, events, StreamEvent{Delta: chunk.Delta.Text})
 				}
 			case "message_stop":
-				sendEvent(ctx, events, StreamEvent{Done: true})
+				sendEvent(ctx, events, StreamEvent{Done: true, FinishReason: finishReason})
 				return
 			case "message_delta":
+				if chunk.Delta.StopReason != "" {
+					finishReason = chunk.Delta.StopReason
+				}
 				usage := TokenUsage{InputTokens: chunk.Usage.InputTokens, OutputTokens: chunk.Usage.OutputTokens}
 				usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 				sendEvent(ctx, events, StreamEvent{Usage: &usage})
@@ -210,10 +220,10 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			sendEvent(ctx, events, StreamEvent{Err: err})
+			sendEvent(ctx, events, StreamEvent{Err: ClassifyStreamError(ctx, err)})
 			return
 		}
-		sendEvent(ctx, events, StreamEvent{Done: true})
+		sendEvent(ctx, events, StreamEvent{Err: NewStreamError(StreamErrorDisconnected, io.ErrUnexpectedEOF)})
 	}()
 	return events
 }

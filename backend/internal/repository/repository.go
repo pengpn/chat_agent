@@ -23,7 +23,7 @@ type ChatRepository interface {
 	FindByIDForUser(ctx context.Context, userID, id string) (model.Conversation, error)
 	ListByConversationForUser(ctx context.Context, userID, conversationID string) ([]model.Message, error)
 	CreateTurn(ctx context.Context, userMessage, assistantMessage *model.Message) error
-	Finalize(ctx context.Context, id, content, think, status string, usage model.MessageUsage) (model.Message, error)
+	Finalize(ctx context.Context, id string, completion model.MessageCompletion) (model.Message, error)
 }
 
 func New(db *gorm.DB) *Repositories {
@@ -64,17 +64,26 @@ func (r *Repositories) ListByConversationForUser(ctx context.Context, userID, co
 	return r.Messages.ListByConversationForUser(ctx, userID, conversationID)
 }
 
-func (r *Repositories) Finalize(ctx context.Context, id, content, think, status string, usage model.MessageUsage) (model.Message, error) {
-	return r.Messages.Finalize(ctx, id, content, think, status, usage)
+func (r *Repositories) Finalize(ctx context.Context, id string, completion model.MessageCompletion) (model.Message, error) {
+	return r.Messages.Finalize(ctx, id, completion)
 }
 
 func Migrate(ctx context.Context, db *gorm.DB) error {
 	if err := db.WithContext(ctx).Exec("CREATE EXTENSION IF NOT EXISTS pgcrypto").Error; err != nil {
 		return err
 	}
-	return db.WithContext(ctx).AutoMigrate(
+	if err := db.WithContext(ctx).AutoMigrate(
 		&model.User{},
 		&model.Conversation{},
 		&model.Message{},
-	)
+	); err != nil {
+		return err
+	}
+	// GORM does not update an existing named CHECK constraint when its tag
+	// changes, so replace it explicitly when adding a new message state.
+	return db.WithContext(ctx).Exec(`
+		ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_status_check;
+		ALTER TABLE messages ADD CONSTRAINT messages_status_check
+		CHECK (status IN ('streaming', 'complete', 'stopped', 'interrupted', 'error'))
+	`).Error
 }

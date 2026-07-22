@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
@@ -22,6 +23,13 @@ type ChatService struct {
 	maxToolCalls int
 	thinking     *provider.ThinkingConfig
 	systemPrompt string
+	stream       StreamConfig
+}
+
+type StreamConfig struct {
+	TTFTTimeout     time.Duration
+	TotalTimeout    time.Duration
+	FinalizeTimeout time.Duration
 }
 
 type ChatInput struct {
@@ -38,8 +46,8 @@ type ChatSession struct {
 	request          provider.ChatRequest
 }
 
-func NewChat(repository repository.ChatRepository, providers provider.Resolver, tools *tool.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string) *ChatService {
-	return &ChatService{repository: repository, providers: providers, tools: tools, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt}
+func NewChat(repository repository.ChatRepository, providers provider.Resolver, tools *tool.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig) *ChatService {
+	return &ChatService{repository: repository, providers: providers, tools: tools, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream}
 }
 
 func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string, input ChatInput) (*ChatSession, error) {
@@ -107,73 +115,83 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	return session, nil
 }
 
+// 业务编排层，负责多轮模型调用、工具执行、内容聚合、用量统计和数据库落库。
 func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent func(provider.StreamEvent)) (model.Message, string, error) {
 	var answer strings.Builder
 	var think strings.Builder
 	var usage provider.TokenUsage
 	usageReported := false
 	status := "complete"
+	finishReason := ""
 	messages := append([]provider.Message(nil), session.request.Messages...)
 	toolCalls := 0
+	streamCtx := ctx
+	cancelStream := func() {}
+	if s.stream.TotalTimeout > 0 {
+		streamCtx, cancelStream = context.WithTimeout(ctx, s.stream.TotalTimeout)
+	}
+	defer cancelStream()
 
 	for {
 		request := session.request
 		request.Messages = messages
-		var turnAnswer, turnThink strings.Builder
-		var turnUsage provider.TokenUsage
-		turnUsageReported := false
-		requestedTools := make([]provider.ToolCall, 0)
-
-		for event := range session.provider.ChatStream(ctx, request) {
-			if event.Err != nil {
-				status = "error"
-				onEvent(event)
-				break
-			}
-			if event.Delta != "" {
-				turnAnswer.WriteString(event.Delta)
-				answer.WriteString(event.Delta)
-				onEvent(event)
-			}
-			if event.ThinkDelta != "" {
-				turnThink.WriteString(event.ThinkDelta)
-				think.WriteString(event.ThinkDelta)
-				onEvent(event)
-			}
-			if event.Usage != nil {
-				turnUsage.Merge(*event.Usage)
-				turnUsageReported = true
-			}
-			if len(event.ToolCalls) > 0 {
-				requestedTools = append(requestedTools, event.ToolCalls...)
-			}
-			if event.Done {
-				break
-			}
-		}
-		if turnUsageReported {
-			usage.Add(turnUsage)
+		turn := s.consumeProviderStream(ctx, streamCtx, session.provider, request, onEvent)
+		answer.WriteString(turn.answer)
+		think.WriteString(turn.think)
+		if turn.usageReported {
+			usage.Add(turn.usage)
 			usageReported = true
 		}
-		if status != "complete" || ctx.Err() != nil || len(requestedTools) == 0 {
+		finishReason = turn.finishReason
+		if turn.err != nil {
+			kind := provider.StreamErrorKindOf(turn.err)
+			logger.Warn(ctx, "model stream interrupted",
+				logger.String("provider", session.AssistantMessage.Provider),
+				logger.String("model", session.AssistantMessage.Model),
+				logger.String("reason", string(kind)),
+				logger.Err(turn.err),
+			)
+			finishReason = string(kind)
+			if kind == provider.StreamErrorCanceled {
+				status = "stopped"
+			} else if kind == provider.StreamErrorUpstream {
+				status = "error"
+				onEvent(provider.StreamEvent{Err: turn.err})
+			} else {
+				status = "interrupted"
+				onEvent(provider.StreamEvent{Err: turn.err})
+			}
+			break
+		}
+		if len(turn.toolCalls) == 0 {
 			break
 		}
 		if s.tools == nil {
 			status = "error"
+			finishReason = "tool_registry_unavailable"
 			onEvent(provider.StreamEvent{Err: errors.New("模型请求了工具，但服务端未启用工具注册表")})
 			break
 		}
 		if toolCalls >= s.maxToolCalls {
 			status = "error"
+			finishReason = "tool_iteration_limit"
 			onEvent(provider.StreamEvent{Err: fmt.Errorf("工具调用超过最大轮次 %d", s.maxToolCalls)})
 			break
 		}
 
 		toolCalls++
-		messages = s.executeToolCalls(ctx, messages, turnAnswer.String(), turnThink.String(), requestedTools)
+		// 执行本轮模型请求的工具：把 assistant（含 tool_calls）和各 tool 结果追加进 messages，
+		// 供下一轮 ChatStream 继续对话。
+		messages = s.executeToolCalls(streamCtx, messages, turn.answer, turn.think, turn.toolCalls)
 	}
 	if ctx.Err() != nil {
 		status = "stopped"
+		finishReason = string(provider.StreamErrorCanceled)
+	} else if errors.Is(streamCtx.Err(), context.DeadlineExceeded) && status == "complete" {
+		status = "interrupted"
+		finishReason = string(provider.StreamErrorTotalTimeout)
+	} else if status == "complete" && finishReason == "" {
+		finishReason = "stop"
 	}
 	usageData := model.MessageUsage{
 		InputTokens:   usage.InputTokens,
@@ -184,8 +202,115 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	if usageReported {
 		usageData.CostNanoUSD, usageData.CostKnown = s.providers.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
 	}
-	completed, err := s.repository.Finalize(context.Background(), session.AssistantMessage.ID, answer.String(), think.String(), status, usageData)
+	completed, err := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
+		Content: answer.String(), Think: think.String(), Status: status, FinishReason: finishReason, Usage: usageData,
+	})
 	return completed, status, err
+}
+
+type streamTurn struct {
+	answer        string
+	think         string
+	toolCalls     []provider.ToolCall
+	usage         provider.TokenUsage
+	usageReported bool
+	finishReason  string
+	err           error
+}
+
+func (s *ChatService) consumeProviderStream(parentCtx, streamCtx context.Context, client provider.Provider, request provider.ChatRequest, onEvent func(provider.StreamEvent)) streamTurn {
+	callCtx, cancel := context.WithCancel(streamCtx)
+	defer cancel()
+	events := client.ChatStream(callCtx, request)
+	var answer, think strings.Builder
+	result := streamTurn{toolCalls: make([]provider.ToolCall, 0)}
+	var ttftTimer *time.Timer
+	var ttft <-chan time.Time
+	firstEventReceived := false
+	var connectedAt time.Time
+
+	stopTTFT := func() {
+		if ttftTimer != nil && !ttftTimer.Stop() {
+			select {
+			case <-ttftTimer.C:
+			default:
+			}
+		}
+		ttft = nil
+	}
+	defer stopTTFT()
+
+	for {
+		select {
+		case <-parentCtx.Done():
+			result.err = provider.NewStreamError(provider.StreamErrorCanceled, parentCtx.Err())
+			result.answer, result.think = answer.String(), think.String()
+			return result
+		case <-streamCtx.Done():
+			kind := provider.StreamErrorTotalTimeout
+			if parentCtx.Err() != nil {
+				kind = provider.StreamErrorCanceled
+			}
+			result.err = provider.NewStreamError(kind, streamCtx.Err())
+			result.answer, result.think = answer.String(), think.String()
+			return result
+		case <-ttft:
+			result.err = provider.NewStreamError(provider.StreamErrorTTFTTimeout, errors.New("等待模型首个事件超时"))
+			result.answer, result.think = answer.String(), think.String()
+			return result
+		case event, ok := <-events:
+			if !ok {
+				switch {
+				case parentCtx.Err() != nil:
+					result.err = provider.NewStreamError(provider.StreamErrorCanceled, parentCtx.Err())
+				case errors.Is(streamCtx.Err(), context.DeadlineExceeded):
+					result.err = provider.NewStreamError(provider.StreamErrorTotalTimeout, streamCtx.Err())
+				default:
+					result.err = provider.NewStreamError(provider.StreamErrorDisconnected, errors.New("模型流未收到正常结束标记"))
+				}
+				result.answer, result.think = answer.String(), think.String()
+				return result
+			}
+			if event.Connected && !firstEventReceived && s.stream.TTFTTimeout > 0 {
+				connectedAt = time.Now()
+				stopTTFT()
+				ttftTimer = time.NewTimer(s.stream.TTFTTimeout)
+				ttft = ttftTimer.C
+			}
+			if event.Activity && !firstEventReceived {
+				firstEventReceived = true
+				stopTTFT()
+				if !connectedAt.IsZero() {
+					logger.Info(parentCtx, "model stream first event received", logger.Int64("ttft_ms", time.Since(connectedAt).Milliseconds()))
+				}
+			}
+			if event.Err != nil {
+				result.err = provider.ClassifyStreamError(parentCtx, event.Err)
+				result.answer, result.think = answer.String(), think.String()
+				return result
+			}
+			if event.Delta != "" {
+				answer.WriteString(event.Delta)
+				onEvent(provider.StreamEvent{Delta: event.Delta})
+			}
+			if event.ThinkDelta != "" {
+				think.WriteString(event.ThinkDelta)
+				onEvent(provider.StreamEvent{ThinkDelta: event.ThinkDelta})
+			}
+			if event.Usage != nil {
+				result.usage.Merge(*event.Usage)
+				result.usageReported = true
+			}
+			if len(event.ToolCalls) > 0 {
+				result.toolCalls = append(result.toolCalls, event.ToolCalls...)
+			}
+			if event.Done {
+				result.answer, result.think = answer.String(), think.String()
+				result.finishReason = event.FinishReason
+				return result
+			}
+		}
+	}
 }
 
 // Chat runs a non-streaming request, including the same server-side tool loop
@@ -245,7 +370,13 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 	if usageReported {
 		usageData.CostNanoUSD, usageData.CostKnown = s.providers.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
 	}
-	completed, finalizeErr := s.repository.Finalize(context.Background(), session.AssistantMessage.ID, answer.String(), think.String(), status, usageData)
+	finishReason := "stop"
+	if status != "complete" {
+		finishReason = status
+	}
+	completed, finalizeErr := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
+		Content: answer.String(), Think: think.String(), Status: status, FinishReason: finishReason, Usage: usageData,
+	})
 	if finalizeErr != nil {
 		return model.Message{}, finalizeErr
 	}
@@ -255,9 +386,26 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 	return completed, nil
 }
 
+// finalize is the only deliberately detached operation in the stream
+// lifecycle. It has a strict deadline and only persists the terminal state so
+// canceled requests do not leave messages stuck as "streaming".
+func (s *ChatService) finalize(messageID string, completion model.MessageCompletion) (model.Message, error) {
+	timeout := s.stream.FinalizeTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.repository.Finalize(ctx, messageID, completion)
+}
+
 func (s *ChatService) executeToolCalls(ctx context.Context, messages []provider.Message, assistantContent, assistantThink string, calls []provider.ToolCall) []provider.Message {
 	messages = append(messages, provider.Message{Role: "assistant", Content: assistantContent, ReasoningContent: assistantThink, ToolCalls: calls})
+	// 循环执行工具调用：把 tool 执行结果追加进 messages，供下一轮 ChatStream 继续对话。
 	for _, call := range calls {
+		if ctx.Err() != nil {
+			break
+		}
 		logger.Info(ctx, "tool execution started",
 			logger.String("tool_call_id", call.ID),
 			logger.String("tool_name", call.Function.Name),

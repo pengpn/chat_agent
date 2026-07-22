@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseModelPricing(t *testing.T) {
 	pricing, err := parseModelPricing("model-a:0.15:0.60,model-b:1.2:4.8")
@@ -12,6 +15,13 @@ func TestParseModelPricing(t *testing.T) {
 	}
 	if _, err := parseModelPricing("missing-output:0.15"); err == nil {
 		t.Fatal("expected invalid pricing to fail")
+	}
+}
+
+func TestStreamConfigurationParsers(t *testing.T) {
+	t.Setenv("TEST_STREAM_TIMEOUT", "1500ms")
+	if timeout, err := positiveDurationEnv("TEST_STREAM_TIMEOUT", "2m"); err != nil || timeout != 1500*time.Millisecond {
+		t.Fatalf("timeout=%s err=%v", timeout, err)
 	}
 }
 

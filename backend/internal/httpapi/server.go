@@ -7,6 +7,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/example/agent-platform/backend/internal/service"
+	"github.com/example/agent-platform/backend/internal/streamcache"
 	"github.com/example/agent-platform/backend/internal/tool"
 )
 
@@ -18,6 +19,7 @@ type Server struct {
 }
 
 func NewServer(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, cfg config.Config) *Server {
+	streams := streamcache.New(cfg.StreamCacheTTL, cfg.StreamCacheMaxEvents)
 	return &Server{
 		handlers: handler.New(
 			service.NewAuth(repositories.Users, jwtManager),
@@ -25,8 +27,12 @@ func NewServer(repositories *repository.Repositories, jwtManager *auth.JWTManage
 			service.NewChat(repositories, providers, tool.NewDefaultRegistry(), cfg.MaxToolIterations, &provider.ThinkingConfig{
 				Enabled:      cfg.EnableThinking,
 				BudgetTokens: cfg.ThinkingBudgetTokens,
-			}, cfg.SystemPrompt),
+			}, cfg.SystemPrompt, service.StreamConfig{
+				TTFTTimeout:  cfg.StreamTTFTTimeout,
+				TotalTimeout: cfg.StreamTotalTimeout,
+			}),
 			service.NewCatalog(providers),
+			streams,
 		),
 		jwt:                jwtManager,
 		corsAllowedOrigins: cfg.CORSAllowedOrigins,
