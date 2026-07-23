@@ -13,9 +13,11 @@ import (
 	"github.com/example/agent-platform/backend/internal/config"
 	"github.com/example/agent-platform/backend/internal/database"
 	"github.com/example/agent-platform/backend/internal/httpapi"
+	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -53,7 +55,27 @@ func main() {
 
 	jwtManager := auth.NewJWTManager(cfg.JWTSecret, cfg.JWTTTL)
 	providers := provider.NewRegistry(cfg.Providers)
-	server := httpapi.NewServer(repositories, jwtManager, providers, cfg)
+	var limiter llmgateway.RateLimiter
+	var redisClient *redis.Client
+	if cfg.LLMRateTokensPerMinute > 0 {
+		redisOptions, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			logger.Error(context.Background(), "invalid Redis URL", logger.Err(err))
+			os.Exit(1)
+		}
+		redisClient = redis.NewClient(redisOptions)
+		redisCtx, cancelRedis := context.WithTimeout(context.Background(), 5*time.Second)
+		err = redisClient.Ping(redisCtx).Err()
+		cancelRedis()
+		if err != nil {
+			_ = redisClient.Close()
+			logger.Error(context.Background(), "redis connection failed", logger.Err(err))
+			os.Exit(1)
+		}
+		defer redisClient.Close()
+		limiter = llmgateway.NewTokenBucketLimiter(redisClient, cfg.LLMRateTokensPerMinute, cfg.LLMRateBurst, "")
+	}
+	server := httpapi.NewServerWithRateLimiter(repositories, jwtManager, providers, limiter, cfg)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

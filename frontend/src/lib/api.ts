@@ -91,11 +91,12 @@ export type ChatPayload = { content: string; provider: string; model: string; te
 
 // chatMessage is the non-streaming counterpart to streamMessage. It waits for
 // the full model result, including any model-provided reasoning in `think`.
-export async function chatMessage(conversationID: string, payload: ChatPayload): Promise<{ userMessage: Message; assistantMessage: Message }> {
-  return request<{ userMessage: Message; assistantMessage: Message }>(`/api/v1/conversations/${conversationID}/messages/chat`, {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  })
+export async function chatMessage(conversationID: string, payload: ChatPayload, idempotencyKey = crypto.randomUUID()): Promise<{ userMessage: Message; assistantMessage: Message }> {
+	return request<{ userMessage: Message; assistantMessage: Message }>(`/api/v1/conversations/${conversationID}/messages/chat`, {
+		method: 'POST',
+		headers: { 'Idempotency-Key': idempotencyKey },
+		body: JSON.stringify(payload)
+	})
 }
 
 type StreamHandlers = {
@@ -118,11 +119,12 @@ export async function streamMessage(
   conversationID: string,
   payload: ChatPayload,
   handlers: StreamHandlers,
-  signal: AbortSignal
+  signal: AbortSignal,
+  idempotencyKey: string
 ): Promise<void> {
   const response = await fetch(`/api/v1/conversations/${conversationID}/messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Accept: 'text/event-stream', 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(payload),
     signal
   })

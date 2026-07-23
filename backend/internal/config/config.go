@@ -36,6 +36,7 @@ type Config struct {
 	DatabaseMaxIdleConns    int
 	DatabaseConnMaxLifetime time.Duration
 	DatabaseConnMaxIdleTime time.Duration
+	RedisURL                string
 	JWTSecret               string
 	JWTTTL                  time.Duration
 	CORSAllowedOrigins      []string
@@ -48,6 +49,13 @@ type Config struct {
 	StreamCacheMaxEvents    int
 	EnableThinking          bool
 	ThinkingBudgetTokens    int
+	LLMTokenBudget          int64
+	LLMMaxOutputTokens      int64
+	LLMRateTokensPerMinute  int64
+	LLMRateBurst            int64
+	LLMIdempotencyTTL       time.Duration
+	LLMSyncMaxRetries       int
+	LLMRetryBackoff         time.Duration
 	SystemPrompt            string
 	Providers               []ProviderConfig
 }
@@ -119,6 +127,37 @@ func Load() (Config, error) {
 	if err := validateThinkingBudgetTokens(thinkingBudgetTokens); err != nil {
 		return Config{}, err
 	}
+	llmTokenBudget, err := positiveInt64Env("LLM_TOKEN_BUDGET", 32_768)
+	if err != nil {
+		return Config{}, err
+	}
+	llmMaxOutputTokens, err := positiveInt64Env("LLM_MAX_OUTPUT_TOKENS", 4_096)
+	if err != nil {
+		return Config{}, err
+	}
+	llmRateTokensPerMinute, err := nonNegativeInt64Env("LLM_RATE_TOKENS_PER_MINUTE", 120_000)
+	if err != nil {
+		return Config{}, err
+	}
+	llmRateBurst, err := nonNegativeInt64Env("LLM_RATE_BURST", 120_000)
+	if err != nil {
+		return Config{}, err
+	}
+	llmIdempotencyTTL, err := positiveDurationEnv("LLM_IDEMPOTENCY_TTL", "24h")
+	if err != nil {
+		return Config{}, err
+	}
+	llmSyncMaxRetries, err := nonNegativeIntEnv("LLM_SYNC_MAX_RETRIES", 1)
+	if err != nil {
+		return Config{}, err
+	}
+	if llmSyncMaxRetries > 3 {
+		return Config{}, fmt.Errorf("LLM_SYNC_MAX_RETRIES must not exceed 3")
+	}
+	llmRetryBackoff, err := positiveDurationEnv("LLM_RETRY_BACKOFF", "200ms")
+	if err != nil {
+		return Config{}, err
+	}
 
 	providers, err := configuredProviders(streamConnectTimeout)
 	if err != nil {
@@ -132,6 +171,7 @@ func Load() (Config, error) {
 		DatabaseMaxIdleConns:    databaseMaxIdleConns,
 		DatabaseConnMaxLifetime: databaseConnMaxLifetime,
 		DatabaseConnMaxIdleTime: databaseConnMaxIdleTime,
+		RedisURL:                env("REDIS_URL", "redis://localhost:6379/0"),
 		JWTSecret:               os.Getenv("JWT_SECRET"),
 		JWTTTL:                  ttl,
 		CORSAllowedOrigins:      splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
@@ -144,6 +184,13 @@ func Load() (Config, error) {
 		StreamCacheMaxEvents:    streamCacheMaxEvents,
 		EnableThinking:          enableThinking,
 		ThinkingBudgetTokens:    thinkingBudgetTokens,
+		LLMTokenBudget:          llmTokenBudget,
+		LLMMaxOutputTokens:      llmMaxOutputTokens,
+		LLMRateTokensPerMinute:  llmRateTokensPerMinute,
+		LLMRateBurst:            llmRateBurst,
+		LLMIdempotencyTTL:       llmIdempotencyTTL,
+		LLMSyncMaxRetries:       llmSyncMaxRetries,
+		LLMRetryBackoff:         llmRetryBackoff,
 		SystemPrompt:            env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
 		Providers:               providers,
 	}
@@ -209,6 +256,33 @@ func positiveIntEnv(key string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+func nonNegativeIntEnv(key string, fallback int) (int, error) {
+	value := env(key, fmt.Sprintf("%d", fallback))
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative integer", key)
+	}
+	return parsed, nil
+}
+
+func positiveInt64Env(key string, fallback int64) (int64, error) {
+	value := env(key, fmt.Sprintf("%d", fallback))
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+func nonNegativeInt64Env(key string, fallback int64) (int64, error) {
+	value := env(key, fmt.Sprintf("%d", fallback))
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative integer", key)
 	}
 	return parsed, nil
 }

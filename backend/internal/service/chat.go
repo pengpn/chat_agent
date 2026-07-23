@@ -10,6 +10,7 @@ import (
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
+	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
@@ -18,7 +19,7 @@ import (
 
 type ChatService struct {
 	repository   repository.ChatRepository
-	providers    provider.Resolver
+	gateway      llmgateway.Gateway
 	tools        *tool.Registry
 	maxToolCalls int
 	thinking     *provider.ThinkingConfig
@@ -37,17 +38,21 @@ type ChatInput struct {
 	Provider    string
 	Model       string
 	Temperature *float64
+	// IdempotencyKey comes from the HTTP Idempotency-Key header. It scopes one
+	// complete business message rather than individual model retries.
+	IdempotencyKey string
 }
 
 type ChatSession struct {
 	UserMessage      model.Message
 	AssistantMessage model.Message
-	provider         provider.Provider
+	OperationID      string
+	UserID           string
 	request          provider.ChatRequest
 }
 
-func NewChat(repository repository.ChatRepository, providers provider.Resolver, tools *tool.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig) *ChatService {
-	return &ChatService{repository: repository, providers: providers, tools: tools, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream}
+func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig) *ChatService {
+	return &ChatService{repository: repository, gateway: gateway, tools: tools, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream}
 }
 
 func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string, input ChatInput) (*ChatSession, error) {
@@ -64,8 +69,7 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		}
 		return nil, err
 	}
-	modelProvider, err := s.providers.Get(input.Provider, input.Model)
-	if err != nil {
+	if err := s.gateway.Validate(input.Provider, input.Model); err != nil {
 		return nil, &ProviderSelectionError{err: err}
 	}
 	history, err := s.repository.ListByConversationForUser(ctx, userID, conversationID)
@@ -73,7 +77,13 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		return nil, err
 	}
 
+	operationID := llmgateway.OperationID(userID, conversationID, strings.TrimSpace(input.IdempotencyKey))
+	if err := s.gateway.Begin(ctx, operationID); err != nil {
+		return nil, err
+	}
 	session := &ChatSession{
+		OperationID: operationID,
+		UserID:      userID,
 		UserMessage: model.Message{
 			ConversationID: conversationID,
 			Role:           "user",
@@ -89,6 +99,7 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		},
 	}
 	if err := s.repository.CreateTurn(ctx, &session.UserMessage, &session.AssistantMessage); err != nil {
+		s.gateway.Abandon(operationID)
 		return nil, err
 	}
 
@@ -102,12 +113,11 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		}
 	}
 	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
-	session.provider = modelProvider
 	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature}
-	if s.providers.SupportsTools(input.Provider) && s.tools != nil {
+	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
 		request.Tools = s.tools.Definitions()
 	}
-	if s.thinking != nil && s.thinking.Enabled && s.providers.SupportsThinking(input.Provider, input.Model) {
+	if s.thinking != nil && s.thinking.Enabled && s.gateway.SupportsThinking(input.Provider, input.Model) {
 		thinking := *s.thinking
 		request.Thinking = &thinking
 	}
@@ -125,6 +135,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	finishReason := ""
 	messages := append([]provider.Message(nil), session.request.Messages...)
 	toolCalls := 0
+	modelTurn := 0
 	streamCtx := ctx
 	cancelStream := func() {}
 	if s.stream.TotalTimeout > 0 {
@@ -133,9 +144,14 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	defer cancelStream()
 
 	for {
+		modelTurn++
 		request := session.request
 		request.Messages = messages
-		turn := s.consumeProviderStream(ctx, streamCtx, session.provider, request, onEvent)
+		turn := s.consumeProviderStream(ctx, streamCtx, llmgateway.Request{
+			OperationID: session.OperationID, UserID: session.UserID,
+			Provider: session.AssistantMessage.Provider, Model: session.AssistantMessage.Model,
+			Turn: modelTurn, ChatRequest: request,
+		}, onEvent)
 		answer.WriteString(turn.answer)
 		think.WriteString(turn.think)
 		if turn.usageReported {
@@ -200,11 +216,16 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		UsageReported: usageReported,
 	}
 	if usageReported {
-		usageData.CostNanoUSD, usageData.CostKnown = s.providers.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
+		usageData.CostNanoUSD, usageData.CostKnown = s.gateway.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
 	}
 	completed, err := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
 		Content: answer.String(), Think: think.String(), Status: status, FinishReason: finishReason, Usage: usageData,
 	})
+	if err != nil {
+		s.gateway.Abandon(session.OperationID)
+	} else {
+		s.gateway.Complete(session.OperationID)
+	}
 	return completed, status, err
 }
 
@@ -218,10 +239,10 @@ type streamTurn struct {
 	err           error
 }
 
-func (s *ChatService) consumeProviderStream(parentCtx, streamCtx context.Context, client provider.Provider, request provider.ChatRequest, onEvent func(provider.StreamEvent)) streamTurn {
+func (s *ChatService) consumeProviderStream(parentCtx, streamCtx context.Context, request llmgateway.Request, onEvent func(provider.StreamEvent)) streamTurn {
 	callCtx, cancel := context.WithCancel(streamCtx)
 	defer cancel()
-	events := client.ChatStream(callCtx, request)
+	events := s.gateway.ChatStream(callCtx, request)
 	var answer, think strings.Builder
 	result := streamTurn{toolCalls: make([]provider.ToolCall, 0)}
 	var ttftTimer *time.Timer
@@ -291,11 +312,11 @@ func (s *ChatService) consumeProviderStream(parentCtx, streamCtx context.Context
 			}
 			if event.Delta != "" {
 				answer.WriteString(event.Delta)
-				onEvent(provider.StreamEvent{Delta: event.Delta})
+				onEvent(provider.StreamEvent{Delta: event.Delta, Sequence: event.Sequence})
 			}
 			if event.ThinkDelta != "" {
 				think.WriteString(event.ThinkDelta)
-				onEvent(provider.StreamEvent{ThinkDelta: event.ThinkDelta})
+				onEvent(provider.StreamEvent{ThinkDelta: event.ThinkDelta, Sequence: event.Sequence})
 			}
 			if event.Usage != nil {
 				result.usage.Merge(*event.Usage)
@@ -323,11 +344,17 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 	var chatErr error
 	messages := append([]provider.Message(nil), session.request.Messages...)
 	toolCalls := 0
+	modelTurn := 0
 
 	for {
+		modelTurn++
 		request := session.request
 		request.Messages = messages
-		result, err := session.provider.Chat(ctx, request)
+		result, err := s.gateway.Chat(ctx, llmgateway.Request{
+			OperationID: session.OperationID, UserID: session.UserID,
+			Provider: session.AssistantMessage.Provider, Model: session.AssistantMessage.Model,
+			Turn: modelTurn, ChatRequest: request,
+		})
 		if err != nil {
 			status = "error"
 			chatErr = err
@@ -368,7 +395,7 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		UsageReported: usageReported,
 	}
 	if usageReported {
-		usageData.CostNanoUSD, usageData.CostKnown = s.providers.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
+		usageData.CostNanoUSD, usageData.CostKnown = s.gateway.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
 	}
 	finishReason := "stop"
 	if status != "complete" {
@@ -378,8 +405,10 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		Content: answer.String(), Think: think.String(), Status: status, FinishReason: finishReason, Usage: usageData,
 	})
 	if finalizeErr != nil {
+		s.gateway.Abandon(session.OperationID)
 		return model.Message{}, finalizeErr
 	}
+	s.gateway.Complete(session.OperationID)
 	if chatErr != nil {
 		return completed, chatErr
 	}

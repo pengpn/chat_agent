@@ -16,6 +16,7 @@
 - OpenAI-compatible function calling：模型可请求服务端白名单工具，当前内置安全算术 `calculator`
 - 通过环境变量启用模型；前端只看到已配置密钥的模型，密钥永不离开后端
 - Zap JSON 结构化日志、全链路 `X-Request-ID`，以及每次模型调用的 token/成本记录
+- `LLMGateway` 统一模型调用：Token 预算预估、令牌桶限流、同步重试、幂等、流序号和观测
 - Docker Compose 一键启动 PostgreSQL
 
 ## 快速启动
@@ -25,7 +26,7 @@
 ```bash
 cp .env.example .env
 # 编辑 .env：至少设置 JWT_SECRET，并填入一个模型的 API Key
-docker compose up -d postgres
+docker compose up -d postgres redis
 
 cd backend
 go mod tidy
@@ -62,7 +63,8 @@ backend/
     middleware/               # 鉴权、CORS、日志、panic 恢复
     response/                 # 统一的 code/msg/data JSON 响应包装
   internal/logger/            # Zap 日志封装、Request ID 上下文
-  internal/provider/          # 统一模型接口与协议适配器
+  internal/llmgateway/        # 统一模型调用入口：预算、限流、重试、幂等、观测
+  internal/provider/          # 供应商协议适配器（仅由 LLMGateway 调用）
   internal/tool/              # 服务端工具定义、白名单与执行实现
 frontend/src/                 # Vue 3 对话 UI
 ```
@@ -97,6 +99,16 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 供应商流一旦失效不会自动重放模型请求，因此不会因为所谓“重连”产生第二笔模型调用和重复 token 费用。客户端补发仅重放本服务已经缓存的 SSE 事件。
 
 当前短期缓存是单进程内存实现，适合本地学习和单实例部署。多实例生产环境应替换为 Redis Stream 等共享存储，并让重连请求按 `messageId` 访问同一份事件序列。
+
+## LLMGateway 调用边界
+
+`ChatService` 不再直接调用供应商适配器。每一个模型轮次都经过 `LLMGateway`，其中 `LLMClient` 是供应商协议适配层，`TokenEstimator` 在请求发出前估算输入与输出预留 token，`RateLimiter` 先扣用户/供应商/模型维度的令牌桶，`Observation` 记录每次调用的结构化生命周期日志。
+
+调用方应为一条用户消息提供 `Idempotency-Key` HTTP 请求头。该键会与用户、会话组成幂等记录，并覆盖从创建消息到完成/中断落库的整个业务消息；Gateway 内部的同步网络重试不会重复创建消息或重新获得幂等锁。前端已自动为每次发送生成该请求头。相同 key 仍在执行时返回 `409`，已完成时同样返回 `409`，客户端应加载会话中的既有结果。
+
+`LLM_TOKEN_BUDGET`、`LLM_MAX_OUTPUT_TOKENS` 和 `LLM_RATE_TOKENS_PER_MINUTE` 控制请求准入；估算超预算或桶余额不足时，模型请求不会发到供应商。`LLM_SYNC_MAX_RETRIES` 只处理非流式、可重试的网络失败。流式调用绝不自动重放：Gateway 为每一个解析后的供应商事件增加 `modelSequence`，HTTP 层再为缓存/SSE 事件分配独立的 `sequence`；浏览器补发以 SSE `sequence` 去重，因此不会重复展示片段或重复计费。
+
+`RateLimiter` 使用 Redis Lua 脚本实现原子令牌桶，支持多实例共享额度；`IdempotencyStore` 仍是进程内实现，生产多实例应将其替换为 Redis 等共享存储并设置合理 TTL。
 
 非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 

@@ -119,12 +119,13 @@ async function send(content: string, provider: string, model: string) {
 	if (!activeID.value || streamControllers.has(activeID.value)) return
 	const conversationID = activeID.value
 	const controller = new AbortController()
+	const idempotencyKey = crypto.randomUUID()
   error.value = ''
   streamNotice.value = ''
-	streamControllers.set(conversationID, controller)
+  streamControllers.set(conversationID, controller)
   let receivedDone = false
   try {
-    await streamMessage(conversationID, { content, provider, model }, {
+	await streamMessage(conversationID, { content, provider, model }, {
       onMetadata(userMessage, assistantMessage) {
 		liveTurns.set(conversationID, { userMessage, assistantMessage })
 		if (activeID.value === conversationID) {
@@ -174,7 +175,7 @@ async function send(content: string, provider: string, model: string) {
         const latest = messages.value[messages.value.length - 1]
         if (latest?.role === 'assistant') latest.status = 'error'
       }
-    }, controller.signal)
+	}, controller.signal, idempotencyKey)
 	if (activeID.value === conversationID && !receivedDone && !error.value && messages.value.at(-1)?.role === 'assistant') {
       messages.value[messages.value.length - 1].status = 'stopped'
     }

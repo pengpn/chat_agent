@@ -19,8 +19,8 @@ type Message struct {
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
-// ToolDefinition is the OpenAI-compatible function tool schema sent to a
-// model. Tool execution itself always remains in the service process.
+// ToolDefinition 是发送给模型的 OpenAI 兼容函数工具结构。
+// 工具执行始终保留在服务进程中。
 type ToolDefinition struct {
 	Type     string                 `json:"type"`
 	Function ToolFunctionDefinition `json:"function"`
@@ -32,7 +32,7 @@ type ToolFunctionDefinition struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
-// ToolCall is a function invocation requested by a model.
+// ToolCall 表示模型请求执行的一次函数调用。
 type ToolCall struct {
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
@@ -52,14 +52,14 @@ type ChatRequest struct {
 	Temperature *float64
 }
 
-// ThinkingConfig requests model reasoning when the selected Provider and model
-// support it. BudgetTokens is currently used by Anthropic's native API.
+// ThinkingConfig 在所选 Provider 和模型支持时请求模型返回推理内容。
+// BudgetTokens 当前用于 Anthropic 的原生 API。
 type ThinkingConfig struct {
 	Enabled      bool
 	BudgetTokens int
 }
 
-// ChatResponse is the complete, non-streaming model result.
+// ChatResponse 表示完整的非流式模型结果。
 type ChatResponse struct {
 	Content   string
 	Think     string
@@ -68,6 +68,9 @@ type ChatResponse struct {
 }
 
 type StreamEvent struct {
+	// Sequence 由 LLMGateway 在解析供应商协议后分配，与对外的 SSE 序号不同；
+	// 后者还包含元数据和最终缓存事件。
+	Sequence     int64
 	Delta        string      // 最终回答文本增量
 	ThinkDelta   string      // 思考内容增量
 	ToolCalls    []ToolCall  // 模型请求的工具调用
@@ -79,8 +82,8 @@ type StreamEvent struct {
 	Err          error       // 当前请求失败
 }
 
-// TokenUsage contains token counts reported by a model API. Counts are merged
-// by maximum because streaming APIs typically emit cumulative usage snapshots.
+// TokenUsage 包含模型 API 上报的 Token 用量。流式 API 通常发送累积用量快照，
+// 因此合并时取各项最大值。
 type TokenUsage struct {
 	InputTokens  int64
 	OutputTokens int64
@@ -96,8 +99,7 @@ func (u *TokenUsage) Merge(other TokenUsage) {
 	}
 }
 
-// Add aggregates usage across separate model requests, such as the requests
-// made before and after a tool invocation.
+// Add 汇总多次独立模型请求的用量，例如工具调用前后的请求。
 func (u *TokenUsage) Add(other TokenUsage) {
 	u.InputTokens += other.InputTokens
 	u.OutputTokens += other.OutputTokens
@@ -113,9 +115,8 @@ type Provider interface {
 	ChatStream(ctx context.Context, request ChatRequest) <-chan StreamEvent
 }
 
-// Resolver supplies the configured Provider and its protocol capabilities to
-// the chat service. Keeping this as an interface lets service tests drive the
-// tool loop without a real model endpoint.
+// Resolver 为聊天服务提供已配置的 Provider 及其协议能力。
+// 将其定义为接口后，服务测试无需真实模型端点即可驱动工具调用循环。
 type Resolver interface {
 	Get(id, model string) (Provider, error)
 	SupportsTools(id string) bool
@@ -169,16 +170,14 @@ func (r *Registry) Get(id, model string) (Provider, error) {
 	return nil, fmt.Errorf("model %q is not enabled for provider %q", model, id)
 }
 
-// SupportsTools reports whether the configured provider accepts the OpenAI
-// function-calling request and response schema.
+// SupportsTools 返回已配置 Provider 是否接受 OpenAI 函数调用的请求和响应结构。
 func (r *Registry) SupportsTools(id string) bool {
 	cfg, ok := r.configs[id]
 	return ok && cfg.Type == "openai-compatible"
 }
 
-// SupportsThinking reports whether the Provider can be asked to return
-// reasoning with this model. It deliberately excludes generic OpenAI and Kimi
-// requests: they do not share a safe, standard thinking request parameter.
+// SupportsThinking 返回是否可要求该 Provider 使用指定模型返回推理内容。
+// 通用 OpenAI 和 Kimi 请求被刻意排除，因为它们没有共享且安全的标准思考参数。
 func (r *Registry) SupportsThinking(id, model string) bool {
 	cfg, ok := r.configs[id]
 	if !ok {
@@ -217,9 +216,8 @@ func (r *Registry) IDs() []string {
 	return result
 }
 
-// CalculateCost converts provider-reported token usage into nano USD using
-// deployment-provided pricing. It returns false when no price is configured
-// for the selected model.
+// CalculateCost 使用部署配置的价格，将 Provider 上报的 Token 用量换算为纳美元。
+// 所选模型未配置价格时返回 false。
 func (r *Registry) CalculateCost(providerID, model string, usage TokenUsage) (int64, bool) {
 	cfg, ok := r.configs[providerID]
 	if !ok {
@@ -229,7 +227,7 @@ func (r *Registry) CalculateCost(providerID, model string, usage TokenUsage) (in
 	if !ok {
 		return 0, false
 	}
-	// USD / million tokens * tokens * 1e9 nano USD / 1e6 tokens.
+	// 美元/百万 Token × Token 数 × 10^9 纳美元/10^6 Token。
 	cost := float64(usage.InputTokens)*pricing.InputUSDPerMillionTokens*1_000 +
 		float64(usage.OutputTokens)*pricing.OutputUSDPerMillionTokens*1_000
 	return int64(math.Round(cost)), true

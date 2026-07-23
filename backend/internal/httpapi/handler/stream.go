@@ -9,6 +9,7 @@ import (
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/httpapi/response"
+	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/service"
@@ -16,14 +17,13 @@ import (
 )
 
 func (h *Handler) StreamMessage(c *gin.Context) {
-	session, ok := h.prepareChatSession(c)
-	if !ok {
-		return
-	}
-
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器不支持流式响应")
+		return
+	}
+	session, ok := h.prepareChatSession(c)
+	if !ok {
 		return
 	}
 	c.Header("Content-Type", "text/event-stream; charset=utf-8")
@@ -44,10 +44,10 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 			return
 		}
 		if event.ThinkDelta != "" {
-			h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "think", map[string]any{"content": event.ThinkDelta}, false)
+			h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "think", map[string]any{"content": event.ThinkDelta, "modelSequence": event.Sequence}, false)
 		}
 		if event.Delta != "" {
-			h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "delta", map[string]any{"content": event.Delta}, false)
+			h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "delta", map[string]any{"content": event.Delta, "modelSequence": event.Sequence}, false)
 		}
 	})
 	if err != nil {
@@ -143,6 +143,14 @@ func (h *Handler) ChatMessage(c *gin.Context) {
 	completed, err := h.chat.Chat(c.Request.Context(), session)
 	if err != nil {
 		logger.Error(c.Request.Context(), "non-streaming model chat failed", logger.Err(err))
+		if errors.Is(err, llmgateway.ErrRateLimitExceeded) {
+			response.WriteErrorResp(c, http.StatusTooManyRequests, err.Error())
+			return
+		}
+		if errors.Is(err, llmgateway.ErrTokenBudgetExceeded) {
+			response.WriteErrorResp(c, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 		response.WriteErrorResp(c, http.StatusBadGateway, "模型调用失败")
 		return
 	}
@@ -162,10 +170,11 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		return nil, false
 	}
 	session, err := h.chat.Prepare(c.Request.Context(), currentUserID(c), c.Param("conversationID"), service.ChatInput{
-		Content:     input.Content,
-		Provider:    input.Provider,
-		Model:       input.Model,
-		Temperature: input.Temperature,
+		Content:        input.Content,
+		Provider:       input.Provider,
+		Model:          input.Model,
+		Temperature:    input.Temperature,
+		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 	})
 	var providerSelectionError *service.ProviderSelectionError
 	switch {
@@ -177,6 +186,12 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		return nil, false
 	case errors.Is(err, service.ErrConversationNotFound):
 		response.WriteErrorResp(c, http.StatusNotFound, "对话不存在")
+		return nil, false
+	case errors.Is(err, llmgateway.ErrIdempotencyInProgress):
+		response.WriteErrorResp(c, http.StatusConflict, "相同消息正在处理，请等待本次请求完成")
+		return nil, false
+	case errors.Is(err, llmgateway.ErrIdempotencyCompleted):
+		response.WriteErrorResp(c, http.StatusConflict, "相同消息已经处理完成，请刷新会话查看结果")
 		return nil, false
 	case errors.As(err, &providerSelectionError):
 		response.WriteErrorResp(c, http.StatusBadRequest, providerSelectionError.Error())
