@@ -41,6 +41,8 @@ type Config struct {
 	JWTTTL                  time.Duration
 	CORSAllowedOrigins      []string
 	LogLevel                string
+	LogDir                  string
+	LogRetentionDays        int
 	MaxToolIterations       int
 	StreamConnectTimeout    time.Duration
 	StreamTTFTTimeout       time.Duration
@@ -95,6 +97,10 @@ func Load() (Config, error) {
 	}
 	if maxToolIterations > 10 {
 		return Config{}, fmt.Errorf("MAX_TOOL_ITERATIONS must not exceed 10")
+	}
+	logRetentionDays, err := positiveIntEnv("LOG_RETENTION_DAYS", 30)
+	if err != nil {
+		return Config{}, err
 	}
 	streamConnectTimeout, err := positiveDurationEnv("STREAM_CONNECT_TIMEOUT", "10s")
 	if err != nil {
@@ -176,6 +182,8 @@ func Load() (Config, error) {
 		JWTTTL:                  ttl,
 		CORSAllowedOrigins:      splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
 		LogLevel:                env("LOG_LEVEL", "INFO"),
+		LogDir:                  env("LOG_DIR", "./logs"),
+		LogRetentionDays:        logRetentionDays,
 		MaxToolIterations:       maxToolIterations,
 		StreamConnectTimeout:    streamConnectTimeout,
 		StreamTTFTTimeout:       streamTTFTTimeout,

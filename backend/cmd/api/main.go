@@ -26,8 +26,8 @@ func main() {
 		_, _ = os.Stderr.WriteString("invalid configuration: " + err.Error() + "\n")
 		os.Exit(1)
 	}
-	if err := logger.Init(cfg.LogLevel, os.Stdout); err != nil {
-		_, _ = os.Stderr.WriteString("invalid LOG_LEVEL: " + err.Error() + "\n")
+	if err := logger.Init(cfg.LogLevel, os.Stdout, logger.FileConfig{Directory: cfg.LogDir, RetentionDays: cfg.LogRetentionDays}); err != nil {
+		_, _ = os.Stderr.WriteString("invalid log configuration: " + err.Error() + "\n")
 		os.Exit(1)
 	}
 	defer logger.Sync()

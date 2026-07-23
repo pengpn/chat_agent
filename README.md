@@ -16,6 +16,7 @@
 - OpenAI-compatible function calling：模型可请求服务端白名单工具，当前内置安全算术 `calculator`
 - 通过环境变量启用模型；前端只看到已配置密钥的模型，密钥永不离开后端
 - Zap JSON 结构化日志、全链路 `X-Request-ID`，以及每次模型调用的 token/成本记录
+- Zap 日志同时输出到 stdout 与按日期轮转的本地 JSON 日志文件
 - `LLMGateway` 统一模型调用：Token 预算预估、令牌桶限流、同步重试、幂等、流序号和观测
 - Docker Compose 一键启动 PostgreSQL
 
@@ -123,6 +124,8 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 ## 可观测性与成本
 
 服务输出 Zap JSON 日志。每个请求都会生成或透传 `X-Request-ID`，并在响应头返回；业务日志和请求完成日志都会自动带上 `request_id`。调用侧使用 `logger.Info(ctx, ...)`、`logger.Error(ctx, ...)` 与字段助手（例如 `logger.String`、`logger.Err`），无需自行初始化或拼接日志字段。
+
+每条日志会同时写入标准输出和 `LOG_DIR`。默认目录为 `./logs`，文件按本地日期命名为 `agent-platform-YYYY-MM-DD.log`；跨日首次写入会自动切换文件，`LOG_RETENTION_DAYS`（默认 `30`）控制过期文件清理。
 
 每条 assistant 消息会额外保存：
 
