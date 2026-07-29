@@ -151,6 +151,10 @@ func (h *Handler) ChatMessage(c *gin.Context) {
 			response.WriteErrorResp(c, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+		if errors.Is(err, llmgateway.ErrStructuredOutputInvalid) {
+			response.WriteErrorResp(c, http.StatusBadGateway, err.Error())
+			return
+		}
 		response.WriteErrorResp(c, http.StatusBadGateway, "模型调用失败")
 		return
 	}
@@ -160,10 +164,11 @@ func (h *Handler) ChatMessage(c *gin.Context) {
 
 func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool) {
 	var input struct {
-		Content     string   `json:"content"`
-		Provider    string   `json:"provider"`
-		Model       string   `json:"model"`
-		Temperature *float64 `json:"temperature"`
+		Content      string   `json:"content"`
+		Provider     string   `json:"provider"`
+		Model        string   `json:"model"`
+		Temperature  *float64 `json:"temperature"`
+		OutputFormat string   `json:"outputFormat"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
@@ -174,6 +179,7 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		Provider:       input.Provider,
 		Model:          input.Model,
 		Temperature:    input.Temperature,
+		OutputFormat:   input.OutputFormat,
 		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 	})
 	var providerSelectionError *service.ProviderSelectionError
@@ -183,6 +189,12 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		return nil, false
 	case errors.Is(err, service.ErrInvalidTemperature):
 		response.WriteErrorResp(c, http.StatusBadRequest, "temperature 必须在 0 到 2 之间")
+		return nil, false
+	case errors.Is(err, service.ErrOutputFormatNotFound):
+		response.WriteErrorResp(c, http.StatusBadRequest, "不支持的输出格式")
+		return nil, false
+	case errors.Is(err, llmgateway.ErrInvalidResponseFormat):
+		response.WriteErrorResp(c, http.StatusBadRequest, err.Error())
 		return nil, false
 	case errors.Is(err, service.ErrConversationNotFound):
 		response.WriteErrorResp(c, http.StatusNotFound, "对话不存在")

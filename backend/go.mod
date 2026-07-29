@@ -7,6 +7,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/redis/go-redis/v9 v9.7.3
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.32.0
 	gorm.io/driver/postgres v1.5.11

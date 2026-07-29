@@ -25,23 +25,37 @@ type openAIThinking struct {
 	Type string `json:"type"`
 }
 
+type openAIResponseFormat struct {
+	Type       string            `json:"type"`
+	JSONSchema *openAIJSONSchema `json:"json_schema,omitempty"`
+}
+
+type openAIJSONSchema struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Schema      json.RawMessage `json:"schema"`
+	Strict      bool            `json:"strict"`
+}
+
 func NewOpenAICompatible(cfg config.ProviderConfig) Provider {
 	return &openAICompatible{providerID: cfg.ID, baseURL: cfg.BaseURL, apiKey: cfg.APIKey, includeUsage: cfg.StreamIncludeUsage, client: newHTTPClient(cfg.ConnectTimeout)}
 }
 
 func (p *openAICompatible) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
 	body := struct {
-		Model       string           `json:"model"`
-		Messages    []Message        `json:"messages"`
-		Tools       []ToolDefinition `json:"tools,omitempty"`
-		ToolChoice  string           `json:"tool_choice,omitempty"`
-		Thinking    *openAIThinking  `json:"thinking,omitempty"`
-		Temperature *float64         `json:"temperature,omitempty"`
+		Model          string                `json:"model"`
+		Messages       []Message             `json:"messages"`
+		Tools          []ToolDefinition      `json:"tools,omitempty"`
+		ToolChoice     string                `json:"tool_choice,omitempty"`
+		Thinking       *openAIThinking       `json:"thinking,omitempty"`
+		Temperature    *float64              `json:"temperature,omitempty"`
+		ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 	}{Model: request.Model, Messages: request.Messages, Tools: request.Tools, Temperature: request.Temperature}
 	if len(request.Tools) > 0 {
 		body.ToolChoice = "auto"
 	}
 	body.Thinking = p.thinkingRequest(request)
+	body.ResponseFormat = p.responseFormat(request.ResponseFormat)
 	if body.Thinking != nil && p.providerID == "deepseek" {
 		// DeepSeek ignores temperature in thinking mode; omit it to make the
 		// request intent explicit and portable across its API versions.
@@ -117,15 +131,17 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 			StreamOptions *struct {
 				IncludeUsage bool `json:"include_usage"`
 			} `json:"stream_options,omitempty"`
-			Tools       []ToolDefinition `json:"tools,omitempty"`
-			ToolChoice  string           `json:"tool_choice,omitempty"`
-			Thinking    *openAIThinking  `json:"thinking,omitempty"`
-			Temperature *float64         `json:"temperature,omitempty"`
+			Tools          []ToolDefinition      `json:"tools,omitempty"`
+			ToolChoice     string                `json:"tool_choice,omitempty"`
+			Thinking       *openAIThinking       `json:"thinking,omitempty"`
+			Temperature    *float64              `json:"temperature,omitempty"`
+			ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 		}{Model: request.Model, Messages: request.Messages, Stream: true, Tools: request.Tools, Temperature: request.Temperature}
 		if len(request.Tools) > 0 {
 			body.ToolChoice = "auto"
 		}
 		body.Thinking = p.thinkingRequest(request)
+		body.ResponseFormat = p.responseFormat(request.ResponseFormat)
 		if body.Thinking != nil && p.providerID == "deepseek" {
 			body.Temperature = nil
 		}
@@ -296,6 +312,24 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 		sendEvent(ctx, events, StreamEvent{Err: NewStreamError(StreamErrorDisconnected, io.ErrUnexpectedEOF)})
 	}()
 	return events
+}
+
+func (p *openAICompatible) responseFormat(format *ResponseFormat) *openAIResponseFormat {
+	if format == nil {
+		return nil
+	}
+	// 目前只对 OpenAI 使用其原生 json_schema 协议。其他兼容厂商的支持范围
+	// 并不一致，由 Gateway 的提示约束与本地校验提供稳定兜底。
+	if p.providerID != "openai" {
+		return nil
+	}
+	return &openAIResponseFormat{
+		Type: "json_schema",
+		JSONSchema: &openAIJSONSchema{
+			Name: format.Name, Description: format.Description,
+			Schema: format.Schema, Strict: format.Strict,
+		},
+	}
 }
 
 func (p *openAICompatible) thinkingRequest(request ChatRequest) *openAIThinking {

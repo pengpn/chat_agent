@@ -50,6 +50,7 @@ func (r *GormMessageRepository) Finalize(ctx context.Context, id string, complet
 	}
 	item.Content = completion.Content
 	item.Think = completion.Think
+	item.StructuredOutput = completion.StructuredOutput
 	item.Status = completion.Status
 	item.FinishReason = completion.FinishReason
 	item.InputTokens = completion.Usage.InputTokens

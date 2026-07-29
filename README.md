@@ -18,6 +18,7 @@
 - Zap JSON 结构化日志、全链路 `X-Request-ID`，以及每次模型调用的 token/成本记录
 - Zap 日志同时输出到 stdout 与按日期轮转的本地 JSON 日志文件
 - `LLMGateway` 统一模型调用：Token 预算预估、令牌桶限流、同步重试、幂等、流序号和观测
+- JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL
 
 ## 快速启动
@@ -111,7 +112,26 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 
 `RateLimiter` 使用 Redis Lua 脚本实现原子令牌桶，支持多实例共享额度；`IdempotencyStore` 仍是进程内实现，生产多实例应将其替换为 Redis 等共享存储并设置合理 TTL。
 
-非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
+非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature` 和 `outputFormat`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
+
+## JSON Schema 结构化输出
+
+流式与非流式消息接口都可以携带服务端注册的 `outputFormat` ID。普通客户端不提交 JSON Schema：
+
+```json
+{
+  "content": "提取联系人信息",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "outputFormat": "contact_extraction"
+}
+```
+
+`internal/outputformat` 是服务端输出格式注册表，当前内置 `contact_extraction` 和 `task_list`。新增业务格式时在注册表中增加 ID、说明和对应 Schema；浏览器只选择 ID，不能修改真正的数据契约。未注册的 ID 返回 `400`。
+
+注册表解析得到的 `ResponseFormat` 只在后端内部流转。OpenAI 适配器会发送原生 `response_format.json_schema`；其他已接入 Provider 使用统一 Schema 提示约束。无论供应商是否原生支持，`LLMGateway` 都会在终态落库前解析并校验完整结果。非流式结果校验失败会按同步重试配置重新调用；流式结果已经向客户端发送过增量，因此不会自动重放，终态会返回错误。
+
+校验成功后，原始 JSON 文本保留在 `assistantMessage.content`，解析后的对象保存在 `assistantMessage.structuredOutput` 和 PostgreSQL 的 `structured_output jsonb` 字段中。Schema 最大 64 KiB，名称只能使用 1 到 64 个字母、数字、下划线或连字符；出于安全考虑，仅允许本 Schema 内部的 `$ref`。工具调用中间轮次不做最终结果校验，工具执行完成后的最终回答才会校验。
 
 除 `204 No Content` 与 SSE 接口外，REST 响应统一为：
 

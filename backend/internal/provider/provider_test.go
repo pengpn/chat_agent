@@ -132,6 +132,38 @@ func TestOpenAICompatibleChatReturnsCompleteResult(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatSendsNativeJSONSchemaResponseFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ResponseFormat struct {
+				Type       string `json:"type"`
+				JSONSchema struct {
+					Name   string         `json:"name"`
+					Strict bool           `json:"strict"`
+					Schema map[string]any `json:"schema"`
+				} `json:"json_schema"`
+			} `json:"response_format"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ResponseFormat.Type != "json_schema" || request.ResponseFormat.JSONSchema.Name != "answer" || !request.ResponseFormat.JSONSchema.Strict || request.ResponseFormat.JSONSchema.Schema["type"] != "object" {
+			t.Fatalf("response_format = %#v", request.ResponseFormat)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"answer\":\"ok\"}"}}]}`))
+	}))
+	defer server.Close()
+
+	client := &openAICompatible{providerID: "openai", baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Model: "demo", Messages: []Message{{Role: "user", Content: "hi"}},
+		ResponseFormat: &ResponseFormat{Type: "json_schema", Name: "answer", Strict: true, Schema: json.RawMessage(`{"type":"object"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeepSeekChatEnablesThinkingAndOmitsTemperature(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

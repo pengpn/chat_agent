@@ -2,6 +2,7 @@ package llmgateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -118,6 +119,103 @@ func TestGatewayObservationRecordsTTFTRetryAndFinishReason(t *testing.T) {
 	}
 }
 
+func TestGatewayValidatesStructuredChatAndRetriesInvalidResult(t *testing.T) {
+	client := &fakeClient{chatResponses: []provider.ChatResponse{
+		{Content: `{"answer":123}`},
+		{Content: `{"answer":"可以"}`},
+	}}
+	gateway := newTestGateway(client, nil, Config{TokenBudget: 10_000, MaxOutputTokens: 4, SyncMaxRetries: 1, RetryBackoff: time.Millisecond})
+	request := testRequest("请回答")
+	request.ChatRequest.ResponseFormat = testResponseFormat()
+
+	response, err := gateway.Chat(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.chatCalls != 2 || string(response.StructuredOutput) != `{"answer":"可以"}` {
+		t.Fatalf("calls=%d structured=%s", client.chatCalls, response.StructuredOutput)
+	}
+	if len(client.requests) == 0 || client.requests[0].Messages[0].Role != "system" {
+		t.Fatalf("structured instruction was not prepended: %#v", client.requests)
+	}
+}
+
+func TestGatewayRejectsInvalidResponseSchemaBeforeSupplierCall(t *testing.T) {
+	client := &fakeClient{}
+	gateway := newTestGateway(client, nil, Config{TokenBudget: 10_000, MaxOutputTokens: 4})
+	request := testRequest("hello")
+	request.ChatRequest.ResponseFormat = &provider.ResponseFormat{Type: "json_schema", Name: "bad name", Schema: json.RawMessage(`{"type":"object"}`)}
+
+	_, err := gateway.Chat(context.Background(), request)
+	if !errors.Is(err, ErrInvalidResponseFormat) || client.chatCalls != 0 {
+		t.Fatalf("err=%v calls=%d", err, client.chatCalls)
+	}
+}
+
+func TestGatewayValidatesStructuredStreamAtDone(t *testing.T) {
+	client := &fakeClient{streamEvents: []provider.StreamEvent{
+		{Delta: `{"answer":`}, {Delta: `"可以"}`}, {Done: true, FinishReason: "stop"},
+	}}
+	gateway := newTestGateway(client, nil, Config{TokenBudget: 10_000, MaxOutputTokens: 4})
+	request := testRequest("请回答")
+	request.ChatRequest.ResponseFormat = testResponseFormat()
+
+	var done provider.StreamEvent
+	for event := range gateway.ChatStream(context.Background(), request) {
+		if event.Err != nil {
+			t.Fatal(event.Err)
+		}
+		if event.Done {
+			done = event
+		}
+	}
+	if !done.Done || string(done.StructuredOutput) != `{"answer":"可以"}` {
+		t.Fatalf("done=%#v", done)
+	}
+}
+
+func TestGatewayRejectsInvalidStructuredStreamInsteadOfDone(t *testing.T) {
+	client := &fakeClient{streamEvents: []provider.StreamEvent{{Delta: `{"answer":123}`}, {Done: true}}}
+	gateway := newTestGateway(client, nil, Config{TokenBudget: 10_000, MaxOutputTokens: 4})
+	request := testRequest("请回答")
+	request.ChatRequest.ResponseFormat = testResponseFormat()
+
+	var streamErr error
+	done := false
+	for event := range gateway.ChatStream(context.Background(), request) {
+		if event.Err != nil {
+			streamErr = event.Err
+		}
+		done = done || event.Done
+	}
+	if !errors.Is(streamErr, ErrStructuredOutputInvalid) || done {
+		t.Fatalf("err=%v done=%v", streamErr, done)
+	}
+}
+
+func TestGatewayStructuredStreamDoesNotValidateToolCallTurn(t *testing.T) {
+	client := &fakeClient{streamEvents: []provider.StreamEvent{
+		{ToolCalls: []provider.ToolCall{{ID: "call_1", Type: "function"}}}, {Done: true},
+	}}
+	gateway := newTestGateway(client, nil, Config{TokenBudget: 10_000, MaxOutputTokens: 4})
+	request := testRequest("调用工具")
+	request.ChatRequest.ResponseFormat = testResponseFormat()
+
+	for event := range gateway.ChatStream(context.Background(), request) {
+		if event.Err != nil {
+			t.Fatal(event.Err)
+		}
+	}
+}
+
+func testResponseFormat() *provider.ResponseFormat {
+	return &provider.ResponseFormat{
+		Type: "json_schema", Name: "answer",
+		Schema: json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}`),
+		Strict: true,
+	}
+}
+
 func newTestGateway(client provider.Provider, limiter RateLimiter, cfg Config) Gateway {
 	return New(fakeCatalog{client: client}, HeuristicTokenEstimator{}, limiter, NewMemoryIdempotencyStore(time.Hour), noopObservation{}, cfg)
 }
@@ -134,19 +232,27 @@ func (fakeCatalog) SupportsThinking(string, string) bool                        
 func (fakeCatalog) CalculateCost(string, string, provider.TokenUsage) (int64, bool) { return 0, false }
 
 type fakeClient struct {
-	chatCalls    int
-	streamCalls  int
-	chatErrors   []error
-	streamEvents []provider.StreamEvent
-	streamDelay  time.Duration
+	chatCalls     int
+	streamCalls   int
+	chatErrors    []error
+	chatResponses []provider.ChatResponse
+	requests      []provider.ChatRequest
+	streamEvents  []provider.StreamEvent
+	streamDelay   time.Duration
 }
 
-func (f *fakeClient) Chat(context.Context, provider.ChatRequest) (provider.ChatResponse, error) {
+func (f *fakeClient) Chat(_ context.Context, request provider.ChatRequest) (provider.ChatResponse, error) {
 	f.chatCalls++
+	f.requests = append(f.requests, request)
 	if len(f.chatErrors) > 0 {
 		err := f.chatErrors[0]
 		f.chatErrors = f.chatErrors[1:]
 		return provider.ChatResponse{}, err
+	}
+	if len(f.chatResponses) > 0 {
+		response := f.chatResponses[0]
+		f.chatResponses = f.chatResponses[1:]
+		return response, nil
 	}
 	return provider.ChatResponse{Content: "ok"}, nil
 }

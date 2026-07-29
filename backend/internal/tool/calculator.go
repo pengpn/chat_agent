@@ -22,6 +22,7 @@ func (calculator) Definition() provider.ToolDefinition {
 		Function: provider.ToolFunctionDefinition{
 			Name:        "calculator",
 			Description: "Evaluate a basic arithmetic expression. Use it for calculations instead of mental arithmetic.",
+			// 工具参数json schema，约束“模型怎样调用后端工具”
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"expression":{"type":"string","description":"Arithmetic using numbers, +, -, *, /, and parentheses."}},"required":["expression"],"additionalProperties":false}`),
 		},
 	}

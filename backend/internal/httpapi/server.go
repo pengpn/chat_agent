@@ -5,6 +5,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/config"
 	"github.com/example/agent-platform/backend/internal/httpapi/handler"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
+	"github.com/example/agent-platform/backend/internal/outputformat"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/example/agent-platform/backend/internal/service"
@@ -42,7 +43,7 @@ func NewServerWithRateLimiter(repositories *repository.Repositories, jwtManager 
 		handlers: handler.New(
 			service.NewAuth(repositories.Users, jwtManager),
 			service.NewConversation(repositories.Conversations, repositories.Messages),
-			service.NewChat(repositories, gateway, tool.NewDefaultRegistry(), cfg.MaxToolIterations, &provider.ThinkingConfig{
+			service.NewChat(repositories, gateway, tool.NewDefaultRegistry(), outputformat.NewDefaultRegistry(), cfg.MaxToolIterations, &provider.ThinkingConfig{
 				Enabled:      cfg.EnableThinking,
 				BudgetTokens: cfg.ThinkingBudgetTokens,
 			}, cfg.SystemPrompt, service.StreamConfig{

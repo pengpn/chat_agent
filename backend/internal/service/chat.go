@@ -12,19 +12,21 @@ import (
 	"github.com/example/agent-platform/backend/internal/domain"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
+	"github.com/example/agent-platform/backend/internal/outputformat"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/example/agent-platform/backend/internal/tool"
 )
 
 type ChatService struct {
-	repository   repository.ChatRepository
-	gateway      llmgateway.Gateway
-	tools        *tool.Registry
-	maxToolCalls int
-	thinking     *provider.ThinkingConfig
-	systemPrompt string
-	stream       StreamConfig
+	repository    repository.ChatRepository
+	gateway       llmgateway.Gateway
+	tools         *tool.Registry
+	outputFormats *outputformat.Registry
+	maxToolCalls  int
+	thinking      *provider.ThinkingConfig
+	systemPrompt  string
+	stream        StreamConfig
 }
 
 type StreamConfig struct {
@@ -34,10 +36,11 @@ type StreamConfig struct {
 }
 
 type ChatInput struct {
-	Content     string
-	Provider    string
-	Model       string
-	Temperature *float64
+	Content      string
+	Provider     string
+	Model        string
+	Temperature  *float64
+	OutputFormat string
 	// IdempotencyKey comes from the HTTP Idempotency-Key header. It scopes one
 	// complete business message rather than individual model retries.
 	IdempotencyKey string
@@ -51,8 +54,11 @@ type ChatSession struct {
 	request          provider.ChatRequest
 }
 
-func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig) *ChatService {
-	return &ChatService{repository: repository, gateway: gateway, tools: tools, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream}
+func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, outputFormats *outputformat.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig) *ChatService {
+	if outputFormats == nil {
+		outputFormats = outputformat.NewDefaultRegistry()
+	}
+	return &ChatService{repository: repository, gateway: gateway, tools: tools, outputFormats: outputFormats, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream}
 }
 
 func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string, input ChatInput) (*ChatSession, error) {
@@ -71,6 +77,17 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	}
 	if err := s.gateway.Validate(input.Provider, input.Model); err != nil {
 		return nil, &ProviderSelectionError{err: err}
+	}
+	var responseFormat *provider.ResponseFormat
+	if formatID := strings.TrimSpace(input.OutputFormat); formatID != "" {
+		var ok bool
+		responseFormat, ok = s.outputFormats.Get(formatID)
+		if !ok {
+			return nil, ErrOutputFormatNotFound
+		}
+		if err := s.gateway.ValidateResponseFormat(responseFormat); err != nil {
+			return nil, err
+		}
 	}
 	history, err := s.repository.ListByConversationForUser(ctx, userID, conversationID)
 	if err != nil {
@@ -113,7 +130,7 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		}
 	}
 	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
-	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature}
+	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
 		request.Tools = s.tools.Definitions()
 	}
@@ -133,6 +150,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	usageReported := false
 	status := "complete"
 	finishReason := ""
+	var structuredOutput json.RawMessage
 	messages := append([]provider.Message(nil), session.request.Messages...)
 	toolCalls := 0
 	modelTurn := 0
@@ -159,6 +177,9 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 			usageReported = true
 		}
 		finishReason = turn.finishReason
+		if len(turn.structuredOutput) > 0 {
+			structuredOutput = turn.structuredOutput
+		}
 		if turn.err != nil {
 			kind := provider.StreamErrorKindOf(turn.err)
 			logger.Warn(ctx, "model stream interrupted",
@@ -219,7 +240,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		usageData.CostNanoUSD, usageData.CostKnown = s.gateway.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
 	}
 	completed, err := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
-		Content: answer.String(), Think: think.String(), Status: status, FinishReason: finishReason, Usage: usageData,
+		Content: answer.String(), Think: think.String(), StructuredOutput: model.JSONDocument(structuredOutput), Status: status, FinishReason: finishReason, Usage: usageData,
 	})
 	if err != nil {
 		s.gateway.Abandon(session.OperationID)
@@ -230,13 +251,14 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 }
 
 type streamTurn struct {
-	answer        string
-	think         string
-	toolCalls     []provider.ToolCall
-	usage         provider.TokenUsage
-	usageReported bool
-	finishReason  string
-	err           error
+	answer           string
+	think            string
+	toolCalls        []provider.ToolCall
+	usage            provider.TokenUsage
+	usageReported    bool
+	finishReason     string
+	structuredOutput json.RawMessage
+	err              error
 }
 
 func (s *ChatService) consumeProviderStream(parentCtx, streamCtx context.Context, request llmgateway.Request, onEvent func(provider.StreamEvent)) streamTurn {
@@ -328,6 +350,7 @@ func (s *ChatService) consumeProviderStream(parentCtx, streamCtx context.Context
 			if event.Done {
 				result.answer, result.think = answer.String(), think.String()
 				result.finishReason = event.FinishReason
+				result.structuredOutput = event.StructuredOutput
 				return result
 			}
 		}
@@ -342,6 +365,7 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 	usageReported := false
 	status := "complete"
 	var chatErr error
+	var structuredOutput json.RawMessage
 	messages := append([]provider.Message(nil), session.request.Messages...)
 	toolCalls := 0
 	modelTurn := 0
@@ -355,6 +379,10 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 			Provider: session.AssistantMessage.Provider, Model: session.AssistantMessage.Model,
 			Turn: modelTurn, ChatRequest: request,
 		})
+		if result.Usage != nil {
+			usage.Add(*result.Usage)
+			usageReported = true
+		}
 		if err != nil {
 			status = "error"
 			chatErr = err
@@ -362,9 +390,8 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		}
 		answer.WriteString(result.Content)
 		think.WriteString(result.Think)
-		if result.Usage != nil {
-			usage.Add(*result.Usage)
-			usageReported = true
+		if len(result.StructuredOutput) > 0 {
+			structuredOutput = result.StructuredOutput
 		}
 		if ctx.Err() != nil || len(result.ToolCalls) == 0 {
 			break
@@ -402,7 +429,7 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		finishReason = status
 	}
 	completed, finalizeErr := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
-		Content: answer.String(), Think: think.String(), Status: status, FinishReason: finishReason, Usage: usageData,
+		Content: answer.String(), Think: think.String(), StructuredOutput: model.JSONDocument(structuredOutput), Status: status, FinishReason: finishReason, Usage: usageData,
 	})
 	if finalizeErr != nil {
 		s.gateway.Abandon(session.OperationID)

@@ -79,7 +79,8 @@ function roleName(message: Message) { return message.role === 'user' ? '你' : m
           <summary>思考过程</summary>
           <div class="message-think-content">{{ message.think }}</div>
         </details>
-        <MarkdownContent :content="message.content" /><span v-if="message.status === 'streaming'" class="cursor" />
+		<pre v-if="message.structuredOutput !== undefined && message.structuredOutput !== null" class="structured-output"><code>{{ JSON.stringify(message.structuredOutput, null, 2) }}</code></pre>
+		<MarkdownContent v-else :content="message.content" /><span v-if="message.status === 'streaming'" class="cursor" />
 		<p v-if="message.status === 'interrupted'" class="message-status">回答已中断，可重新生成。</p>
         <p v-if="message.status === 'error'" class="message-status">这次回答未能完成，请重试。</p>
       </article>

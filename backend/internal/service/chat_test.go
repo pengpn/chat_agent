@@ -12,9 +12,32 @@ import (
 	"github.com/example/agent-platform/backend/internal/tool"
 )
 
+func TestPrepareResolvesServerOwnedOutputFormat(t *testing.T) {
+	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: &scriptedNonStreamToolProvider{}}), nil, nil, 4, nil, "", StreamConfig{})
+	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{
+		Content: "提取联系人", Provider: "openai", Model: "demo", OutputFormat: "contact_extraction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.request.ResponseFormat == nil || session.request.ResponseFormat.Name != "contact_extraction" {
+		t.Fatalf("response format = %#v", session.request.ResponseFormat)
+	}
+}
+
+func TestPrepareRejectsUnknownOutputFormat(t *testing.T) {
+	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: &scriptedNonStreamToolProvider{}}), nil, nil, 4, nil, "", StreamConfig{})
+	_, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{
+		Content: "hello", Provider: "openai", Model: "demo", OutputFormat: "client_defined_schema",
+	})
+	if !errors.Is(err, ErrOutputFormatNotFound) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestChatServiceMarksDisconnectInterruptedWithoutReplayingProvider(t *testing.T) {
 	modelClient := &disconnectingProvider{}
-	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, 4, nil, "", StreamConfig{})
+	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, nil, 4, nil, "", StreamConfig{})
 	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "hello", Provider: "openai", Model: "demo"})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +60,7 @@ func TestChatServiceMarksDisconnectInterruptedWithoutReplayingProvider(t *testin
 
 func TestChatServiceSeparatesTTFTTimeout(t *testing.T) {
 	modelClient := &waitingProvider{connected: true}
-	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, 4, nil, "", StreamConfig{
+	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, nil, 4, nil, "", StreamConfig{
 		TTFTTimeout:  20 * time.Millisecond,
 		TotalTimeout: time.Second,
 	})
@@ -57,7 +80,7 @@ func TestChatServiceSeparatesTTFTTimeout(t *testing.T) {
 
 func TestChatServiceSeparatesTotalTimeout(t *testing.T) {
 	modelClient := &waitingProvider{connected: true, active: true}
-	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, 4, nil, "", StreamConfig{
+	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, nil, 4, nil, "", StreamConfig{
 		TTFTTimeout:  time.Second,
 		TotalTimeout: 20 * time.Millisecond,
 	})
@@ -76,7 +99,7 @@ func TestChatServiceSeparatesTotalTimeout(t *testing.T) {
 
 func TestChatServiceCancellationStopsWithoutReconnect(t *testing.T) {
 	modelClient := &cancelableProvider{}
-	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, 4, nil, "", StreamConfig{})
+	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), nil, nil, 4, nil, "", StreamConfig{})
 	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "hello", Provider: "openai", Model: "demo"})
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +177,7 @@ func (*cancelableProvider) ChatStream(ctx context.Context, _ provider.ChatReques
 func TestChatServiceExecutesToolAndContinuesModelStream(t *testing.T) {
 	modelClient := &scriptedToolProvider{}
 	repository := &fakeChatRepository{}
-	chat := NewChat(repository, testGateway(fakeProviderResolver{client: modelClient}), tool.NewDefaultRegistry(), 4, nil, "", StreamConfig{})
+	chat := NewChat(repository, testGateway(fakeProviderResolver{client: modelClient}), tool.NewDefaultRegistry(), nil, 4, nil, "", StreamConfig{})
 
 	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "2 加 2 等于多少？", Provider: "openai", Model: "demo"})
 	if err != nil {
@@ -204,17 +227,18 @@ func (f *fakeChatRepository) CreateTurn(_ context.Context, user, assistant *mode
 
 func (f *fakeChatRepository) Finalize(_ context.Context, id string, completion model.MessageCompletion) (model.Message, error) {
 	return model.Message{
-		ID:            id,
-		Content:       completion.Content,
-		Think:         completion.Think,
-		Status:        completion.Status,
-		FinishReason:  completion.FinishReason,
-		InputTokens:   completion.Usage.InputTokens,
-		OutputTokens:  completion.Usage.OutputTokens,
-		TotalTokens:   completion.Usage.TotalTokens,
-		UsageReported: completion.Usage.UsageReported,
-		CostNanoUSD:   completion.Usage.CostNanoUSD,
-		CostKnown:     completion.Usage.CostKnown,
+		ID:               id,
+		Content:          completion.Content,
+		Think:            completion.Think,
+		StructuredOutput: completion.StructuredOutput,
+		Status:           completion.Status,
+		FinishReason:     completion.FinishReason,
+		InputTokens:      completion.Usage.InputTokens,
+		OutputTokens:     completion.Usage.OutputTokens,
+		TotalTokens:      completion.Usage.TotalTokens,
+		UsageReported:    completion.Usage.UsageReported,
+		CostNanoUSD:      completion.Usage.CostNanoUSD,
+		CostKnown:        completion.Usage.CostKnown,
 	}, nil
 }
 
@@ -262,7 +286,7 @@ func (s *scriptedToolProvider) ChatStream(_ context.Context, request provider.Ch
 
 func TestChatServiceExecutesToolAndReturnsCompleteResult(t *testing.T) {
 	modelClient := &scriptedNonStreamToolProvider{}
-	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), tool.NewDefaultRegistry(), 4, nil, "", StreamConfig{})
+	chat := NewChat(&fakeChatRepository{}, testGateway(fakeProviderResolver{client: modelClient}), tool.NewDefaultRegistry(), nil, 4, nil, "", StreamConfig{})
 
 	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "2 加 2 等于多少？", Provider: "openai", Model: "demo"})
 	if err != nil {
@@ -318,7 +342,7 @@ func (*scriptedNonStreamToolProvider) ChatStream(_ context.Context, _ provider.C
 
 func TestPrepareEnablesThinkingForCompatibleProvider(t *testing.T) {
 	resolver := thinkingProviderResolver{client: &scriptedToolProvider{}, supported: true}
-	chat := NewChat(&fakeChatRepository{}, testGateway(resolver), tool.NewDefaultRegistry(), 4, &provider.ThinkingConfig{Enabled: true, BudgetTokens: 2048}, "", StreamConfig{})
+	chat := NewChat(&fakeChatRepository{}, testGateway(resolver), tool.NewDefaultRegistry(), nil, 4, &provider.ThinkingConfig{Enabled: true, BudgetTokens: 2048}, "", StreamConfig{})
 
 	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "请分析", Provider: "deepseek", Model: "deepseek-v4-flash"})
 	if err != nil {

@@ -45,11 +45,23 @@ type ToolFunctionCall struct {
 }
 
 type ChatRequest struct {
-	Model       string
-	Messages    []Message
-	Tools       []ToolDefinition
-	Thinking    *ThinkingConfig
-	Temperature *float64
+	Model          string
+	Messages       []Message
+	Tools          []ToolDefinition
+	Thinking       *ThinkingConfig
+	Temperature    *float64
+	ResponseFormat *ResponseFormat
+}
+
+// ResponseFormat 描述最终回答必须满足的 JSON Schema。Gateway 会统一注入
+// 约束提示并校验结果，支持原生 Structured Outputs 的 Provider 还会映射为
+// 对应的供应商协议字段。
+type ResponseFormat struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Schema      json.RawMessage `json:"schema"`
+	Strict      bool            `json:"strict"`
 }
 
 // ThinkingConfig 在所选 Provider 和模型支持时请求模型返回推理内容。
@@ -61,25 +73,27 @@ type ThinkingConfig struct {
 
 // ChatResponse 表示完整的非流式模型结果。
 type ChatResponse struct {
-	Content   string
-	Think     string
-	ToolCalls []ToolCall
-	Usage     *TokenUsage
+	Content          string
+	Think            string
+	ToolCalls        []ToolCall
+	Usage            *TokenUsage
+	StructuredOutput json.RawMessage
 }
 
 type StreamEvent struct {
 	// Sequence 由 LLMGateway 在解析供应商协议后分配，与对外的 SSE 序号不同；
 	// 后者还包含元数据和最终缓存事件。
-	Sequence     int64
-	Delta        string      // 最终回答文本增量
-	ThinkDelta   string      // 思考内容增量
-	ToolCalls    []ToolCall  // 模型请求的工具调用
-	Usage        *TokenUsage // token 用量
-	Connected    bool        // 已收到供应商的成功 HTTP 响应头
-	Activity     bool        // 已收到供应商的首个协议事件
-	Done         bool        // 当前模型请求正常结束
-	FinishReason string      // 供应商报告的结束原因
-	Err          error       // 当前请求失败
+	Sequence         int64
+	Delta            string          // 最终回答文本增量
+	ThinkDelta       string          // 思考内容增量
+	ToolCalls        []ToolCall      // 模型请求的工具调用
+	Usage            *TokenUsage     // token 用量
+	Connected        bool            // 已收到供应商的成功 HTTP 响应头
+	Activity         bool            // 已收到供应商的首个协议事件
+	Done             bool            // 当前模型请求正常结束
+	FinishReason     string          // 供应商报告的结束原因
+	StructuredOutput json.RawMessage // 通过 Schema 校验的完整 JSON，仅在 Done 事件中返回
+	Err              error           // 当前请求失败
 }
 
 // TokenUsage 包含模型 API 上报的 Token 用量。流式 API 通常发送累积用量快照，

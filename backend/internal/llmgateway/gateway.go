@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -18,10 +19,12 @@ import (
 )
 
 var (
-	ErrTokenBudgetExceeded   = errors.New("本次模型请求预计超过 Token 预算")
-	ErrRateLimitExceeded     = errors.New("模型调用额度不足，请稍后重试")
-	ErrIdempotencyInProgress = errors.New("相同幂等请求正在处理")
-	ErrIdempotencyCompleted  = errors.New("相同幂等请求已经完成")
+	ErrTokenBudgetExceeded     = errors.New("本次模型请求预计超过 Token 预算")
+	ErrRateLimitExceeded       = errors.New("模型调用额度不足，请稍后重试")
+	ErrIdempotencyInProgress   = errors.New("相同幂等请求正在处理")
+	ErrIdempotencyCompleted    = errors.New("相同幂等请求已经完成")
+	ErrInvalidResponseFormat   = errors.New("结构化输出配置无效")
+	ErrStructuredOutputInvalid = errors.New("模型返回的结构化输出不符合 Schema")
 )
 
 // LLMClient 是完成协议标准化的供应商客户端。Provider 适配器实现该接口，
@@ -276,6 +279,7 @@ type Request struct {
 // Gateway 是服务中唯一允许依赖的模型调用组件。
 type Gateway interface {
 	Validate(providerID, model string) error
+	ValidateResponseFormat(format *provider.ResponseFormat) error
 	SupportsTools(providerID string) bool
 	SupportsThinking(providerID, model string) bool
 	CalculateCost(providerID, model string, usage provider.TokenUsage) (int64, bool)
@@ -324,6 +328,10 @@ func (g *gateway) Validate(providerID, model string) error {
 	_, err := g.catalog.Get(providerID, model)
 	return err
 }
+func (g *gateway) ValidateResponseFormat(format *provider.ResponseFormat) error {
+	_, err := compileResponseFormat(format)
+	return err
+}
 func (g *gateway) SupportsTools(providerID string) bool { return g.catalog.SupportsTools(providerID) }
 func (g *gateway) SupportsThinking(providerID, model string) bool {
 	return g.catalog.SupportsThinking(providerID, model)
@@ -360,25 +368,43 @@ func (g *gateway) preflight(ctx context.Context, request Request) (LLMClient, in
 }
 
 func (g *gateway) Chat(ctx context.Context, request Request) (provider.ChatResponse, error) {
+	request, schema, err := prepareStructuredRequest(request)
+	if err != nil {
+		g.observe(ctx, request, "chat", 0, 0, 0, 0, "rejected", err, time.Now(), 0, finishReasonForError(err))
+		return provider.ChatResponse{}, err
+	}
 	client, estimated, err := g.preflight(ctx, request)
 	if err != nil {
 		g.observe(ctx, request, "chat", 0, estimated, 0, 0, "rejected", err, time.Now(), 0, finishReasonForError(err))
 		return provider.ChatResponse{}, err
 	}
+	var aggregateUsage provider.TokenUsage
+	usageReported := false
 	for attempt := 1; ; attempt++ {
 		started := time.Now()
 		response, callErr := client.Chat(ctx, request.ChatRequest)
+		attemptActual := int64(0)
+		if response.Usage != nil {
+			attemptActual = response.Usage.TotalTokens
+			aggregateUsage.Add(*response.Usage)
+			usageReported = true
+		}
+		if callErr == nil && schema != nil && len(response.ToolCalls) == 0 {
+			response.StructuredOutput, callErr = validateStructuredContent(schema, response.Content)
+		}
 		if callErr == nil {
-			actual := int64(0)
-			if response.Usage != nil {
-				actual = response.Usage.TotalTokens
+			if usageReported {
+				response.Usage = &aggregateUsage
 			}
-			g.observe(ctx, request, "chat", attempt, estimated, actual, 0, "completed", nil, started, 0, "stop")
+			g.observe(ctx, request, "chat", attempt, estimated, attemptActual, 0, "completed", nil, started, 0, "stop")
 			return response, nil
 		}
-		g.observe(ctx, request, "chat", attempt, estimated, 0, 0, "failed", callErr, started, 0, finishReasonForError(callErr))
-		if attempt > g.config.SyncMaxRetries || !retryable(ctx, callErr) {
-			return provider.ChatResponse{}, callErr
+		g.observe(ctx, request, "chat", attempt, estimated, attemptActual, 0, "failed", callErr, started, 0, finishReasonForError(callErr))
+		if attempt > g.config.SyncMaxRetries || (!retryable(ctx, callErr) && !errors.Is(callErr, ErrStructuredOutputInvalid)) {
+			if usageReported {
+				response.Usage = &aggregateUsage
+			}
+			return response, callErr
 		}
 		if !waitRetry(ctx, time.Duration(attempt)*g.config.RetryBackoff) {
 			return provider.ChatResponse{}, ctx.Err()
@@ -388,6 +414,15 @@ func (g *gateway) Chat(ctx context.Context, request Request) (provider.ChatRespo
 
 func (g *gateway) ChatStream(ctx context.Context, request Request) <-chan provider.StreamEvent {
 	output := make(chan provider.StreamEvent)
+	request, schema, err := prepareStructuredRequest(request)
+	if err != nil {
+		go func() {
+			defer close(output)
+			g.observe(ctx, request, "stream", 0, 0, 0, 0, "rejected", err, time.Now(), 0, finishReasonForError(err))
+			output <- provider.StreamEvent{Err: err}
+		}()
+		return output
+	}
 	client, estimated, err := g.preflight(ctx, request)
 	if err != nil {
 		go func() {
@@ -404,6 +439,8 @@ func (g *gateway) ChatStream(ctx context.Context, request Request) <-chan provid
 		var usage provider.TokenUsage
 		var connectedAt time.Time
 		var ttftMS int64
+		var content strings.Builder
+		hasToolCalls := false
 		status := "interrupted"
 		var finalErr error
 		// 流式请求刻意不重试；一旦流已对外暴露，重放可能造成 Token、工具副作用和供应商费用重复。
@@ -419,6 +456,20 @@ func (g *gateway) ChatStream(ctx context.Context, request Request) <-chan provid
 					base = started
 				}
 				ttftMS = time.Since(base).Milliseconds()
+			}
+			if event.Delta != "" {
+				content.WriteString(event.Delta)
+			}
+			if len(event.ToolCalls) > 0 {
+				hasToolCalls = true
+			}
+			if event.Done && schema != nil && !hasToolCalls {
+				structured, validationErr := validateStructuredContent(schema, content.String())
+				if validationErr != nil {
+					event = provider.StreamEvent{Sequence: sequence, Err: validationErr}
+				} else {
+					event.StructuredOutput = structured
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -475,6 +526,12 @@ func finishReasonForError(err error) string {
 	}
 	if errors.Is(err, ErrTokenBudgetExceeded) {
 		return "token_budget_exceeded"
+	}
+	if errors.Is(err, ErrInvalidResponseFormat) {
+		return "invalid_response_format"
+	}
+	if errors.Is(err, ErrStructuredOutputInvalid) {
+		return "structured_output_invalid"
 	}
 	return string(provider.StreamErrorKindOf(err))
 }

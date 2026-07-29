@@ -87,7 +87,13 @@ export async function listMessages(conversationID: string): Promise<Message[]> {
   return (await request<{ messages: Message[] }>(`/api/v1/conversations/${conversationID}/messages`)).messages
 }
 
-export type ChatPayload = { content: string; provider: string; model: string; temperature?: number }
+export type ChatPayload = {
+	content: string
+	provider: string
+	model: string
+	temperature?: number
+	outputFormat?: string
+}
 
 // chatMessage is the non-streaming counterpart to streamMessage. It waits for
 // the full model result, including any model-provided reasoning in `think`.

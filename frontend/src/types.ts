@@ -24,6 +24,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   think?: string
+	structuredOutput?: unknown
   provider?: string
   model?: string
 	status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error'

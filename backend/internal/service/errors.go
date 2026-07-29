@@ -14,6 +14,7 @@ var (
 	ErrEmptyConversationTitle = errors.New("empty conversation title")
 	ErrInvalidMessageLength   = errors.New("invalid message length")
 	ErrInvalidTemperature     = errors.New("invalid temperature")
+	ErrOutputFormatNotFound   = errors.New("output format not found")
 )
 
 // ProviderSelectionError indicates a client selected a provider or model that
