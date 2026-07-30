@@ -2,6 +2,8 @@
 
 一个适合 Go 后端工程师学习 AI Agent 的最小对话式平台。它先把最关键的基础打牢：用户身份、可持久化多会话、流式回答，以及可替换的大模型 Provider。后续可在此基础上增加工具调用、RAG、工作流、多智能体和观测能力。
 
+后续迭代计划与验收标准见 [TODO.md](./TODO.md)。
+
 实现思路借鉴了优秀开源项目中经过验证的分层理念：前端会话体验参考 [LibreChat](https://github.com/danny-avila/LibreChat) / [Open WebUI](https://github.com/open-webui/open-webui) 的多 Provider 对话模式；Provider 使用类似 LangChain 的统一消息与流事件接口。这里没有复制它们的代码，而是以更小、更适合学习的 Go 版本重新实现。
 
 ## 已实现
