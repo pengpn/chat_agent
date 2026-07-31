@@ -374,6 +374,40 @@ func TestAnthropicChatReturnsContentAndThinking(t *testing.T) {
 	}
 }
 
+func TestAnthropicChatCombinesSystemMessagesAndUsesRequestedOutputLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			System    string    `json:"system"`
+			Messages  []Message `json:"messages"`
+			MaxTokens int64     `json:"max_tokens"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.System != "primary system\n\nEarlier conversation summary:\nsummary" {
+			t.Fatalf("system = %q", request.System)
+		}
+		if request.MaxTokens != 768 || len(request.Messages) != 1 || request.Messages[0].Role != "user" {
+			t.Fatalf("request = %#v", request)
+		}
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	client := &anthropic{baseURL: server.URL, apiKey: "test-key", client: server.Client()}
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Model: "demo", MaxOutputTokens: 768,
+		Messages: []Message{
+			{Role: "system", Content: "primary system"},
+			{Role: "system", Content: "Earlier conversation summary:\nsummary"},
+			{Role: "user", Content: "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRegistrySupportsThinkingOnlyForCompatibleModels(t *testing.T) {
 	registry := NewRegistry([]config.ProviderConfig{
 		{ID: "openai", Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key", Models: []string{"gpt-4o"}},

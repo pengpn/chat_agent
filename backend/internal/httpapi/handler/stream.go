@@ -196,6 +196,9 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 	case errors.Is(err, llmgateway.ErrInvalidResponseFormat):
 		response.WriteErrorResp(c, http.StatusBadRequest, err.Error())
 		return nil, false
+	case errors.Is(err, llmgateway.ErrTokenBudgetExceeded):
+		response.WriteErrorResp(c, http.StatusUnprocessableEntity, "当前消息超过模型可用上下文，请缩短内容后重试")
+		return nil, false
 	case errors.Is(err, service.ErrConversationNotFound):
 		response.WriteErrorResp(c, http.StatusNotFound, "对话不存在")
 		return nil, false

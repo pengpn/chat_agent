@@ -27,12 +27,20 @@ type ChatService struct {
 	thinking      *provider.ThinkingConfig
 	systemPrompt  string
 	stream        StreamConfig
+	context       ContextConfig
 }
 
 type StreamConfig struct {
 	TTFTTimeout     time.Duration
 	TotalTimeout    time.Duration
 	FinalizeTimeout time.Duration
+}
+
+type ContextConfig struct {
+	SummaryEnabled     bool
+	SummaryMaxTokens   int64
+	KeepRecentMessages int
+	SummaryMaxCalls    int
 }
 
 type ChatInput struct {
@@ -47,18 +55,29 @@ type ChatInput struct {
 }
 
 type ChatSession struct {
-	UserMessage      model.Message
-	AssistantMessage model.Message
-	OperationID      string
-	UserID           string
-	request          provider.ChatRequest
+	UserMessage              model.Message
+	AssistantMessage         model.Message
+	OperationID              string
+	UserID                   string
+	request                  provider.ChatRequest
+	preparationUsage         provider.TokenUsage
+	preparationUsageReported bool
 }
 
-func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, outputFormats *outputformat.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig) *ChatService {
+func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, outputFormats *outputformat.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig, contextConfig ContextConfig) *ChatService {
 	if outputFormats == nil {
 		outputFormats = outputformat.NewDefaultRegistry()
 	}
-	return &ChatService{repository: repository, gateway: gateway, tools: tools, outputFormats: outputFormats, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream}
+	if contextConfig.SummaryMaxTokens <= 0 {
+		contextConfig.SummaryMaxTokens = 1024
+	}
+	if contextConfig.KeepRecentMessages <= 0 {
+		contextConfig.KeepRecentMessages = 8
+	}
+	if contextConfig.SummaryMaxCalls <= 0 {
+		contextConfig.SummaryMaxCalls = 2
+	}
+	return &ChatService{repository: repository, gateway: gateway, tools: tools, outputFormats: outputFormats, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream, context: contextConfig}
 }
 
 func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string, input ChatInput) (*ChatSession, error) {
@@ -69,7 +88,8 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	if input.Temperature != nil && (*input.Temperature < 0 || *input.Temperature > 2) {
 		return nil, ErrInvalidTemperature
 	}
-	if _, err := s.repository.FindByIDForUser(ctx, userID, conversationID); err != nil {
+	conversation, err := s.repository.FindByIDForUser(ctx, userID, conversationID)
+	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return nil, ErrConversationNotFound
 		}
@@ -120,14 +140,9 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		return nil, err
 	}
 
-	requestMessages := make([]provider.Message, 0, len(history)+2)
+	requestMessages := make([]provider.Message, 0, 2)
 	if system := strings.TrimSpace(s.systemPrompt); system != "" {
 		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
-	}
-	for _, message := range history {
-		if message.Status == "complete" || message.Status == "stopped" {
-			requestMessages = append(requestMessages, provider.Message{Role: message.Role, Content: message.Content})
-		}
 	}
 	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
 	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
@@ -138,6 +153,27 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		thinking := *s.thinking
 		request.Thinking = &thinking
 	}
+	contextResult, contextErr := s.prepareContext(ctx, session, conversation, history, request)
+	if contextErr != nil {
+		usageData := model.MessageUsage{}
+		if contextResult.usageReported {
+			usageData.InputTokens = contextResult.usage.InputTokens
+			usageData.OutputTokens = contextResult.usage.OutputTokens
+			usageData.TotalTokens = contextResult.usage.TotalTokens
+			usageData.UsageReported = true
+			usageData.CostNanoUSD, usageData.CostKnown = s.gateway.CalculateCost(input.Provider, input.Model, contextResult.usage)
+		}
+		finishReason := "context_preparation_failed"
+		if errors.Is(contextErr, llmgateway.ErrTokenBudgetExceeded) {
+			finishReason = "token_budget_exceeded"
+		}
+		_, _ = s.finalize(session.AssistantMessage.ID, model.MessageCompletion{Status: "error", FinishReason: finishReason, Usage: usageData})
+		s.gateway.Abandon(operationID)
+		return nil, contextErr
+	}
+	request = contextResult.request
+	session.preparationUsage = contextResult.usage
+	session.preparationUsageReported = contextResult.usageReported
 	session.request = request
 	return session, nil
 }
@@ -146,8 +182,8 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent func(provider.StreamEvent)) (model.Message, string, error) {
 	var answer strings.Builder
 	var think strings.Builder
-	var usage provider.TokenUsage
-	usageReported := false
+	usage := session.preparationUsage
+	usageReported := session.preparationUsageReported
 	status := "complete"
 	finishReason := ""
 	var structuredOutput json.RawMessage
@@ -361,8 +397,8 @@ func (s *ChatService) consumeProviderStream(parentCtx, streamCtx context.Context
 // as Stream, and returns content plus model reasoning as one complete result.
 func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Message, error) {
 	var answer, think strings.Builder
-	var usage provider.TokenUsage
-	usageReported := false
+	usage := session.preparationUsage
+	usageReported := session.preparationUsageReported
 	status := "complete"
 	var chatErr error
 	var structuredOutput json.RawMessage

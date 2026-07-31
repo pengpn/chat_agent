@@ -18,6 +18,27 @@ func TestParseModelPricing(t *testing.T) {
 	}
 }
 
+func TestParseModelLimits(t *testing.T) {
+	limits, err := parseModelLimits("model-a:128000:8192", []string{"model-a", "model-b"}, ModelLimits{ContextWindow: 32768, MaxOutputTokens: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits["model-a"].ContextWindow != 128000 || limits["model-a"].MaxOutputTokens != 8192 {
+		t.Fatalf("model-a limits = %#v", limits["model-a"])
+	}
+	if limits["model-b"].ContextWindow != 32768 || limits["model-b"].MaxOutputTokens != 4096 {
+		t.Fatalf("model-b defaults = %#v", limits["model-b"])
+	}
+	for _, value := range []string{"model-a:100", "model-a:100:100", "disabled:100:10"} {
+		if _, err := parseModelLimits(value, []string{"model-a"}, ModelLimits{ContextWindow: 100, MaxOutputTokens: 10}); err == nil {
+			t.Fatalf("parseModelLimits(%q) unexpectedly succeeded", value)
+		}
+	}
+	if _, err := parseModelLimits("", []string{"model-a"}, ModelLimits{ContextWindow: 100, MaxOutputTokens: 100}); err == nil {
+		t.Fatal("expected invalid default limits to fail")
+	}
+}
+
 func TestStreamConfigurationParsers(t *testing.T) {
 	t.Setenv("TEST_STREAM_TIMEOUT", "1500ms")
 	if timeout, err := positiveDurationEnv("TEST_STREAM_TIMEOUT", "2m"); err != nil || timeout != 1500*time.Millisecond {

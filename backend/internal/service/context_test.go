@@ -1,0 +1,220 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/example/agent-platform/backend/internal/database/model"
+	"github.com/example/agent-platform/backend/internal/llmgateway"
+	"github.com/example/agent-platform/backend/internal/provider"
+)
+
+func TestContextManagementSummarizesOldHistoryAndAccountsUsage(t *testing.T) {
+	repository := &fakeChatRepository{history: contextTestHistory(10, 24)}
+	client := &contextTestProvider{}
+	gateway := contextTestGateway(client, provider.ModelLimits{ContextWindow: 220, MaxOutputTokens: 30})
+	chat := NewChat(repository, gateway, nil, nil, 4, nil, "system instruction", StreamConfig{}, ContextConfig{
+		SummaryEnabled: true, SummaryMaxTokens: 20, KeepRecentMessages: 2, SummaryMaxCalls: 3,
+	})
+
+	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "当前问题", Provider: "demo", Model: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.summaryCalls == 0 || repository.summary == "" || repository.summaryThroughMessageID == "" {
+		t.Fatalf("summary calls=%d summary=%q through=%q", client.summaryCalls, repository.summary, repository.summaryThroughMessageID)
+	}
+	budget, err := gateway.TokenBudget("demo", "demo", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	estimated, err := gateway.EstimateInputTokens(session.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if estimated > budget.InputTokenLimit {
+		t.Fatalf("input tokens=%d limit=%d", estimated, budget.InputTokenLimit)
+	}
+	if !containsSystemSummary(session.request.Messages) || session.request.Messages[len(session.request.Messages)-1].Content != "当前问题" {
+		t.Fatalf("messages = %#v", session.request.Messages)
+	}
+
+	completed, err := chat.Chat(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTotal := int64(client.summaryCalls*15 + 5)
+	if !completed.UsageReported || completed.TotalTokens != wantTotal {
+		t.Fatalf("usage=%#v want total=%d", completed, wantTotal)
+	}
+}
+
+func TestContextManagementFallsBackToRecentMessagesWhenSummaryFails(t *testing.T) {
+	repository := &fakeChatRepository{history: contextTestHistory(8, 24)}
+	client := &contextTestProvider{summaryErr: errors.New("summary unavailable")}
+	gateway := contextTestGateway(client, provider.ModelLimits{ContextWindow: 220, MaxOutputTokens: 30})
+	chat := NewChat(repository, gateway, nil, nil, 4, nil, "system", StreamConfig{}, ContextConfig{
+		SummaryEnabled: true, SummaryMaxTokens: 20, KeepRecentMessages: 2, SummaryMaxCalls: 2,
+	})
+
+	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "继续", Provider: "demo", Model: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.summaryCalls != 1 || repository.summary != "" || containsSystemSummary(session.request.Messages) {
+		t.Fatalf("calls=%d persisted=%q messages=%#v", client.summaryCalls, repository.summary, session.request.Messages)
+	}
+	budget, _ := gateway.TokenBudget("demo", "demo", 0)
+	estimated, _ := gateway.EstimateInputTokens(session.request)
+	if estimated > budget.InputTokenLimit {
+		t.Fatalf("fallback tokens=%d limit=%d", estimated, budget.InputTokenLimit)
+	}
+	if len(session.request.Messages) >= len(repository.history)+2 {
+		t.Fatalf("history was not trimmed: messages=%d history=%d", len(session.request.Messages), len(repository.history))
+	}
+}
+
+func TestContextManagementReusesPersistedSummaryBoundary(t *testing.T) {
+	history := contextTestHistory(6, 8)
+	through := history[3].ID
+	repository := &fakeChatRepository{
+		conversation: model.Conversation{ID: "conversation-1", Summary: "用户偏好简洁回答", SummaryThroughMessageID: &through},
+		history:      history,
+	}
+	client := &contextTestProvider{}
+	gateway := contextTestGateway(client, provider.ModelLimits{ContextWindow: 220, MaxOutputTokens: 30})
+	chat := NewChat(repository, gateway, nil, nil, 4, nil, "system", StreamConfig{}, ContextConfig{
+		SummaryEnabled: true, SummaryMaxTokens: 20, KeepRecentMessages: 2, SummaryMaxCalls: 2,
+	})
+
+	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "继续", Provider: "demo", Model: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.summaryCalls != 0 || !containsSystemSummary(session.request.Messages) {
+		t.Fatalf("calls=%d messages=%#v", client.summaryCalls, session.request.Messages)
+	}
+	for _, message := range session.request.Messages {
+		if message.Content == history[0].Content || message.Content == history[3].Content {
+			t.Fatalf("already summarized history leaked into context: %#v", session.request.Messages)
+		}
+	}
+}
+
+func TestContextManagementRejectsCurrentMessageThatCannotFit(t *testing.T) {
+	repository := &fakeChatRepository{}
+	client := &contextTestProvider{}
+	gateway := contextTestGateway(client, provider.ModelLimits{ContextWindow: 100, MaxOutputTokens: 20})
+	chat := NewChat(repository, gateway, nil, nil, 4, nil, "system", StreamConfig{}, ContextConfig{})
+
+	_, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{
+		Content: strings.Repeat("很长的问题", 30), Provider: "demo", Model: "demo",
+	})
+	if !errors.Is(err, llmgateway.ErrTokenBudgetExceeded) {
+		t.Fatalf("err = %v", err)
+	}
+	if repository.lastCompletion.Status != "error" || repository.lastCompletion.FinishReason != "token_budget_exceeded" {
+		t.Fatalf("completion = %#v", repository.lastCompletion)
+	}
+}
+
+func TestContextManagementTrimsLongChineseAndEnglishHistoryOnTurnBoundary(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		content string
+	}{
+		{name: "Chinese", content: strings.Repeat("上下文", 20)},
+		{name: "English", content: strings.Repeat("long conversation context ", 12)},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			history := make([]model.Message, 0, 12)
+			for index := 0; index < 12; index++ {
+				role := "user"
+				if index%2 == 1 {
+					role = "assistant"
+				}
+				history = append(history, model.Message{ID: fmt.Sprintf("message-%02d", index), Role: role, Status: "complete", Content: testCase.content})
+			}
+			repository := &fakeChatRepository{history: history}
+			gateway := contextTestGateway(&contextTestProvider{}, provider.ModelLimits{ContextWindow: 180, MaxOutputTokens: 30})
+			chat := NewChat(repository, gateway, nil, nil, 4, nil, "system", StreamConfig{}, ContextConfig{})
+
+			session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "current", Provider: "demo", Model: "demo"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(session.request.Messages) < 2 || session.request.Messages[1].Role != "user" {
+				t.Fatalf("trimmed history starts with an orphan response: %#v", session.request.Messages)
+			}
+			budget, _ := gateway.TokenBudget("demo", "demo", 0)
+			estimated, _ := gateway.EstimateInputTokens(session.request)
+			if estimated > budget.InputTokenLimit {
+				t.Fatalf("tokens=%d limit=%d", estimated, budget.InputTokenLimit)
+			}
+		})
+	}
+}
+
+func contextTestGateway(client provider.Provider, limits provider.ModelLimits) llmgateway.Gateway {
+	return llmgateway.New(
+		fakeProviderResolver{client: client, limits: limits}, llmgateway.HeuristicTokenEstimator{}, nil,
+		llmgateway.NewMemoryIdempotencyStore(time.Hour), nil,
+		llmgateway.Config{TokenBudget: limits.ContextWindow, MaxOutputTokens: limits.MaxOutputTokens},
+	)
+}
+
+func contextTestHistory(count, contentRunes int) []model.Message {
+	history := make([]model.Message, 0, count)
+	for index := 0; index < count; index++ {
+		role := "user"
+		if index%2 == 1 {
+			role = "assistant"
+		}
+		history = append(history, model.Message{
+			ID: fmt.Sprintf("message-%02d", index), Role: role, Status: "complete",
+			Content: fmt.Sprintf("历史%d-%s", index, strings.Repeat("内", contentRunes)),
+		})
+	}
+	return history
+}
+
+func containsSystemSummary(messages []provider.Message) bool {
+	for _, message := range messages {
+		if message.Role == "system" && strings.HasPrefix(message.Content, "Earlier conversation summary:") {
+			return true
+		}
+	}
+	return false
+}
+
+type contextTestProvider struct {
+	summaryCalls int
+	summaryErr   error
+}
+
+func (p *contextTestProvider) Chat(_ context.Context, request provider.ChatRequest) (provider.ChatResponse, error) {
+	for _, message := range request.Messages {
+		if message.Role == "system" && message.Content == summarySystemPrompt {
+			p.summaryCalls++
+			if p.summaryErr != nil {
+				return provider.ChatResponse{}, p.summaryErr
+			}
+			return provider.ChatResponse{
+				Content: fmt.Sprintf("第%d段历史摘要", p.summaryCalls),
+				Usage:   &provider.TokenUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+			}, nil
+		}
+	}
+	return provider.ChatResponse{Content: "最终回答", Usage: &provider.TokenUsage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5}}, nil
+}
+
+func (*contextTestProvider) ChatStream(context.Context, provider.ChatRequest) <-chan provider.StreamEvent {
+	events := make(chan provider.StreamEvent, 1)
+	events <- provider.StreamEvent{Err: errors.New("unexpected stream call")}
+	close(events)
+	return events
+}

@@ -4,6 +4,10 @@
 
 后续迭代计划与验收标准见 [TODO.md](./TODO.md)。
 
+学习文档：
+
+- [上下文 Token 管理实现解析](./docs/context-token-management.md)
+
 实现思路借鉴了优秀开源项目中经过验证的分层理念：前端会话体验参考 [LibreChat](https://github.com/danny-avila/LibreChat) / [Open WebUI](https://github.com/open-webui/open-webui) 的多 Provider 对话模式；Provider 使用类似 LangChain 的统一消息与流事件接口。这里没有复制它们的代码，而是以更小、更适合学习的 Go 版本重新实现。
 
 ## 已实现
@@ -20,6 +24,7 @@
 - Zap JSON 结构化日志、全链路 `X-Request-ID`，以及每次模型调用的 token/成本记录
 - Zap 日志同时输出到 stdout 与按日期轮转的本地 JSON 日志文件
 - `LLMGateway` 统一模型调用：Token 预算预估、令牌桶限流、同步重试、幂等、流序号和观测
+- 长对话上下文管理：模型级窗口、Token 裁剪、持久化滚动摘要和摘要失败降级
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL
 
@@ -113,6 +118,28 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 `LLM_TOKEN_BUDGET`、`LLM_MAX_OUTPUT_TOKENS` 和 `LLM_RATE_TOKENS_PER_MINUTE` 控制请求准入；估算超预算或桶余额不足时，模型请求不会发到供应商。`LLM_SYNC_MAX_RETRIES` 只处理非流式、可重试的网络失败。流式调用绝不自动重放：Gateway 为每一个解析后的供应商事件增加 `modelSequence`，HTTP 层再为缓存/SSE 事件分配独立的 `sequence`；浏览器补发以 SSE `sequence` 去重，因此不会重复展示片段或重复计费。
 
 `RateLimiter` 使用 Redis Lua 脚本实现原子令牌桶，支持多实例共享额度；`IdempotencyStore` 仍是进程内实现，生产多实例应将其替换为 Redis 等共享存储并设置合理 TTL。
+
+## 上下文 Token 管理
+
+每个 Provider 使用 `*_MODEL_LIMITS` 配置模型的部署上限，格式是逗号分隔的 `模型名:上下文窗口:最大输出Token`。例如：
+
+```dotenv
+OPENAI_MODELS=gpt-4o-mini
+OPENAI_MODEL_LIMITS=gpt-4o-mini:32768:4096
+```
+
+实际预算取模型配置与全局 `LLM_TOKEN_BUDGET` / `LLM_MAX_OUTPUT_TOKENS` 中更严格的值。调用前会计算 system prompt、历史消息、当前问题、工具 JSON Schema、结构化输出约束及输出预留；当前实现使用跨 Provider 的保守估算器，供应商返回的 usage 仍是最终计费和统计依据。若仅 system、工具和当前问题就已超限，请求返回 `422`，不会调用供应商。
+
+历史超限时，服务优先保留 system prompt、当前问题和最近的完整对话轮次，并用当前会话所选模型压缩较早历史。滚动摘要及其消息断点持久化在 `conversations` 表，后续请求只读取断点之后的消息；摘要调用同样经过 `LLMGateway`，其实际 Token 与成本累计到本轮 assistant 消息。摘要失败时会记录警告并退化为按 Token 保留最近历史，不影响当前回答。
+
+相关配置：
+
+- `CONTEXT_SUMMARY_ENABLED`：是否允许生成滚动摘要，默认 `true`；
+- `CONTEXT_SUMMARY_MAX_TOKENS`：单次摘要的最大输出预留，默认 `1024`；
+- `CONTEXT_KEEP_RECENT_MESSAGES`：生成摘要时至少不参与摘要的最近消息数，默认 `8`；
+- `CONTEXT_SUMMARY_MAX_CALLS`：一次用户请求最多进行的摘要调用次数，默认 `2`、最大 `5`。
+
+日志事件 `conversation context prepared` 会记录窗口、输出预留、原始/摘要/丢弃/最终 Token 估算，以及摘要调用次数和最终保留的历史消息数。
 
 非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature` 和 `outputFormat`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 

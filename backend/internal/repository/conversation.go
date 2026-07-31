@@ -19,6 +19,7 @@ type ConversationRepository interface {
 	UpdateTitle(ctx context.Context, userID, id, title string) (model.Conversation, error)
 	Delete(ctx context.Context, userID, id string) error
 	Touch(ctx context.Context, id string) error
+	UpdateSummary(ctx context.Context, userID, id, summary, throughMessageID string) error
 }
 
 // GormConversationRepository is the PostgreSQL/GORM implementation of
@@ -79,4 +80,19 @@ func (r *GormConversationRepository) Touch(ctx context.Context, id string) error
 		Model(&model.Conversation{}).
 		Where("id = ?", id).
 		Update("updated_at", time.Now()).Error
+}
+
+func (r *GormConversationRepository) UpdateSummary(ctx context.Context, userID, id, summary, throughMessageID string) error {
+	result := r.db.WithContext(ctx).Model(&model.Conversation{}).
+		Where("id = ? AND user_id = ?", id, userID).
+		Updates(map[string]any{
+			"summary": summary, "summary_through_message_id": throughMessageID, "summary_updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }

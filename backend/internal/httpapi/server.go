@@ -49,6 +49,9 @@ func NewServerWithRateLimiter(repositories *repository.Repositories, jwtManager 
 			}, cfg.SystemPrompt, service.StreamConfig{
 				TTFTTimeout:  cfg.StreamTTFTTimeout,
 				TotalTimeout: cfg.StreamTotalTimeout,
+			}, service.ContextConfig{
+				SummaryEnabled: cfg.ContextSummaryEnabled, SummaryMaxTokens: cfg.ContextSummaryMaxTokens,
+				KeepRecentMessages: cfg.ContextKeepRecentMessages, SummaryMaxCalls: cfg.ContextSummaryMaxCalls,
 			}),
 			service.NewCatalog(providers),
 			streams,

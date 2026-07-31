@@ -50,7 +50,8 @@ func (p *openAICompatible) Chat(ctx context.Context, request ChatRequest) (ChatR
 		Thinking       *openAIThinking       `json:"thinking,omitempty"`
 		Temperature    *float64              `json:"temperature,omitempty"`
 		ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
-	}{Model: request.Model, Messages: request.Messages, Tools: request.Tools, Temperature: request.Temperature}
+		MaxTokens      int64                 `json:"max_tokens,omitempty"`
+	}{Model: request.Model, Messages: request.Messages, Tools: request.Tools, Temperature: request.Temperature, MaxTokens: request.MaxOutputTokens}
 	if len(request.Tools) > 0 {
 		body.ToolChoice = "auto"
 	}
@@ -136,7 +137,8 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 			Thinking       *openAIThinking       `json:"thinking,omitempty"`
 			Temperature    *float64              `json:"temperature,omitempty"`
 			ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
-		}{Model: request.Model, Messages: request.Messages, Stream: true, Tools: request.Tools, Temperature: request.Temperature}
+			MaxTokens      int64                 `json:"max_tokens,omitempty"`
+		}{Model: request.Model, Messages: request.Messages, Stream: true, Tools: request.Tools, Temperature: request.Temperature, MaxTokens: request.MaxOutputTokens}
 		if len(request.Tools) > 0 {
 			body.ToolChoice = "auto"
 		}

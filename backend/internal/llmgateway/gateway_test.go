@@ -24,6 +24,40 @@ func TestGatewayRejectsBeforeClientWhenTokenBudgetExceeded(t *testing.T) {
 	}
 }
 
+func TestGatewayTokenBudgetUsesStrictestConfiguredLimits(t *testing.T) {
+	gateway := New(
+		fakeCatalog{client: &fakeClient{}, limits: provider.ModelLimits{ContextWindow: 8_000, MaxOutputTokens: 2_000}},
+		HeuristicTokenEstimator{}, nil, NewMemoryIdempotencyStore(time.Hour), noopObservation{},
+		Config{TokenBudget: 10_000, MaxOutputTokens: 4_000},
+	)
+
+	budget, err := gateway.TokenBudget("demo", "demo", 1_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if budget.ContextWindow != 8_000 || budget.MaxOutputTokens != 1_000 || budget.InputTokenLimit != 7_000 {
+		t.Fatalf("budget = %#v", budget)
+	}
+}
+
+func TestHeuristicTokenEstimatorCountsCJKAndToolSchema(t *testing.T) {
+	estimator := HeuristicTokenEstimator{}
+	withoutTool := estimator.EstimateInput(provider.ChatRequest{Messages: []provider.Message{{Role: "user", Content: "这是中文"}}})
+	withTool := estimator.EstimateInput(provider.ChatRequest{
+		Messages: []provider.Message{{Role: "user", Content: "这是中文"}},
+		Tools: []provider.ToolDefinition{{Function: provider.ToolFunctionDefinition{
+			Name: "lookup", Description: "查询天气",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"城市":{"type":"string"}}}`),
+		}}},
+	})
+	if withoutTool < 11 {
+		t.Fatalf("CJK estimate = %d, want conservative framing and rune count", withoutTool)
+	}
+	if withTool <= withoutTool {
+		t.Fatalf("tool schema was not included: without=%d with=%d", withoutTool, withTool)
+	}
+}
+
 func TestGatewayChargesRateBucketBeforeSupplierCall(t *testing.T) {
 	client := &fakeClient{}
 	limiter := rejectedLimiter{}
@@ -224,12 +258,18 @@ func testRequest(content string) Request {
 	return Request{UserID: "user-1", Provider: "demo", Model: "demo", ChatRequest: provider.ChatRequest{Model: "demo", Messages: []provider.Message{{Role: "user", Content: content}}}}
 }
 
-type fakeCatalog struct{ client provider.Provider }
+type fakeCatalog struct {
+	client provider.Provider
+	limits provider.ModelLimits
+}
 
 func (f fakeCatalog) Get(string, string) (provider.Provider, error)                 { return f.client, nil }
 func (fakeCatalog) SupportsTools(string) bool                                       { return false }
 func (fakeCatalog) SupportsThinking(string, string) bool                            { return false }
 func (fakeCatalog) CalculateCost(string, string, provider.TokenUsage) (int64, bool) { return 0, false }
+func (f fakeCatalog) Limits(string, string) (provider.ModelLimits, bool) {
+	return f.limits, f.limits.ContextWindow > 0
+}
 
 type fakeClient struct {
 	chatCalls     int

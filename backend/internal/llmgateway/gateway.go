@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+	"unicode"
 
 	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/provider"
@@ -40,10 +40,12 @@ type Catalog interface {
 	SupportsTools(id string) bool
 	SupportsThinking(id, model string) bool
 	CalculateCost(providerID, model string, usage provider.TokenUsage) (int64, bool)
+	Limits(providerID, model string) (provider.ModelLimits, bool)
 }
 
 // TokenEstimator 在调用供应商前估算预算；调用完成后的实际供应商用量才是计费依据。
 type TokenEstimator interface {
+	EstimateInput(request provider.ChatRequest) int64
 	Estimate(request provider.ChatRequest, outputReserve int64) int64
 }
 
@@ -51,27 +53,45 @@ type TokenEstimator interface {
 // Unicode 字符消耗一个 Token，大多数拉丁文本约每四个 Unicode 字符消耗一个 Token。
 type HeuristicTokenEstimator struct{}
 
-func (HeuristicTokenEstimator) Estimate(request provider.ChatRequest, outputReserve int64) int64 {
-	var runes int
+func (HeuristicTokenEstimator) EstimateInput(request provider.ChatRequest) int64 {
+	var tokens int64 = 3 // request framing
 	for _, message := range request.Messages {
-		runes += utf8.RuneCountInString(message.Content)
-		runes += utf8.RuneCountInString(message.ReasoningContent)
+		tokens += 4 // role and message framing
+		tokens += estimateTextTokens(message.Content)
+		tokens += estimateTextTokens(message.ReasoningContent)
+		tokens += estimateTextTokens(message.ToolCallID)
 		for _, call := range message.ToolCalls {
-			runes += utf8.RuneCountInString(call.Function.Name) + utf8.RuneCountInString(call.Function.Arguments)
+			tokens += estimateTextTokens(call.ID) + estimateTextTokens(call.Function.Name) + estimateTextTokens(call.Function.Arguments)
 		}
 	}
 	for _, definition := range request.Tools {
-		runes += utf8.RuneCountInString(definition.Function.Name)
-		runes += utf8.RuneCountInString(definition.Function.Description)
-		runes += len(definition.Function.Parameters)
+		tokens += 8
+		tokens += estimateTextTokens(definition.Function.Name)
+		tokens += estimateTextTokens(definition.Function.Description)
+		tokens += estimateTextTokens(string(definition.Function.Parameters))
 	}
-	// 每个 Token 对应三个 Unicode 字符，是中英文混合提示词与工具结构的保守折中值，
-	// 同时保留协议开销。
-	input := int64((runes+2)/3 + 16)
+	return tokens
+}
+
+func (e HeuristicTokenEstimator) Estimate(request provider.ChatRequest, outputReserve int64) int64 {
 	if outputReserve < 0 {
 		outputReserve = 0
 	}
-	return input + outputReserve
+	return e.EstimateInput(request) + outputReserve
+}
+
+func estimateTextTokens(value string) int64 {
+	var cjk, other int64
+	for _, r := range value {
+		if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) {
+			cjk++
+		} else {
+			other++
+		}
+	}
+	// CJK is conservatively treated as one token per rune. Latin text usually
+	// averages around four characters per token; round up to avoid undercounting.
+	return cjk + (other+3)/4
 }
 
 // RateLimiter 在调用供应商前扣减预估 Token 用量。
@@ -276,6 +296,12 @@ type Request struct {
 	ChatRequest provider.ChatRequest
 }
 
+type TokenBudget struct {
+	ContextWindow   int64
+	MaxOutputTokens int64
+	InputTokenLimit int64
+}
+
 // Gateway 是服务中唯一允许依赖的模型调用组件。
 type Gateway interface {
 	Validate(providerID, model string) error
@@ -283,6 +309,8 @@ type Gateway interface {
 	SupportsTools(providerID string) bool
 	SupportsThinking(providerID, model string) bool
 	CalculateCost(providerID, model string, usage provider.TokenUsage) (int64, bool)
+	TokenBudget(providerID, model string, requestedOutput int64) (TokenBudget, error)
+	EstimateInputTokens(request provider.ChatRequest) (int64, error)
 	Begin(ctx context.Context, operationID string) error
 	Complete(operationID string)
 	Abandon(operationID string)
@@ -339,6 +367,36 @@ func (g *gateway) SupportsThinking(providerID, model string) bool {
 func (g *gateway) CalculateCost(providerID, model string, usage provider.TokenUsage) (int64, bool) {
 	return g.catalog.CalculateCost(providerID, model, usage)
 }
+func (g *gateway) TokenBudget(providerID, model string, requestedOutput int64) (TokenBudget, error) {
+	if _, err := g.catalog.Get(providerID, model); err != nil {
+		return TokenBudget{}, err
+	}
+	contextWindow := g.config.TokenBudget
+	maxOutput := g.config.MaxOutputTokens
+	if limits, ok := g.catalog.Limits(providerID, model); ok {
+		if limits.ContextWindow > 0 && limits.ContextWindow < contextWindow {
+			contextWindow = limits.ContextWindow
+		}
+		if limits.MaxOutputTokens > 0 && limits.MaxOutputTokens < maxOutput {
+			maxOutput = limits.MaxOutputTokens
+		}
+	}
+	if requestedOutput > 0 && requestedOutput < maxOutput {
+		maxOutput = requestedOutput
+	}
+	if maxOutput >= contextWindow {
+		return TokenBudget{}, fmt.Errorf("model output reservation %d must be smaller than context window %d", maxOutput, contextWindow)
+	}
+	return TokenBudget{ContextWindow: contextWindow, MaxOutputTokens: maxOutput, InputTokenLimit: contextWindow - maxOutput}, nil
+}
+
+func (g *gateway) EstimateInputTokens(request provider.ChatRequest) (int64, error) {
+	prepared, _, err := prepareStructuredRequest(Request{ChatRequest: request})
+	if err != nil {
+		return 0, err
+	}
+	return g.estimator.EstimateInput(prepared.ChatRequest), nil
+}
 func (g *gateway) Begin(_ context.Context, operationID string) error {
 	return g.idempotency.Begin(operationID, time.Now())
 }
@@ -350,8 +408,12 @@ func (g *gateway) preflight(ctx context.Context, request Request) (LLMClient, in
 	if err != nil {
 		return nil, 0, err
 	}
-	estimated := g.estimator.Estimate(request.ChatRequest, g.config.MaxOutputTokens)
-	if estimated > g.config.TokenBudget {
+	budget, err := g.TokenBudget(request.Provider, request.Model, request.ChatRequest.MaxOutputTokens)
+	if err != nil {
+		return nil, 0, err
+	}
+	estimated := g.estimator.Estimate(request.ChatRequest, budget.MaxOutputTokens)
+	if estimated > budget.ContextWindow {
 		return nil, estimated, ErrTokenBudgetExceeded
 	}
 	key := request.UserID + ":" + request.Provider + ":" + request.Model
@@ -373,6 +435,11 @@ func (g *gateway) Chat(ctx context.Context, request Request) (provider.ChatRespo
 		g.observe(ctx, request, "chat", 0, 0, 0, 0, "rejected", err, time.Now(), 0, finishReasonForError(err))
 		return provider.ChatResponse{}, err
 	}
+	budget, err := g.TokenBudget(request.Provider, request.Model, request.ChatRequest.MaxOutputTokens)
+	if err != nil {
+		return provider.ChatResponse{}, err
+	}
+	request.ChatRequest.MaxOutputTokens = budget.MaxOutputTokens
 	client, estimated, err := g.preflight(ctx, request)
 	if err != nil {
 		g.observe(ctx, request, "chat", 0, estimated, 0, 0, "rejected", err, time.Now(), 0, finishReasonForError(err))
@@ -423,6 +490,15 @@ func (g *gateway) ChatStream(ctx context.Context, request Request) <-chan provid
 		}()
 		return output
 	}
+	budget, err := g.TokenBudget(request.Provider, request.Model, request.ChatRequest.MaxOutputTokens)
+	if err != nil {
+		go func() {
+			defer close(output)
+			output <- provider.StreamEvent{Err: err}
+		}()
+		return output
+	}
+	request.ChatRequest.MaxOutputTokens = budget.MaxOutputTokens
 	client, estimated, err := g.preflight(ctx, request)
 	if err != nil {
 		go func() {

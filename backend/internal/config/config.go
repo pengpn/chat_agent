@@ -18,7 +18,15 @@ type ProviderConfig struct {
 	Models             []string                `json:"models"`
 	StreamIncludeUsage bool                    `json:"-"`
 	ModelPricing       map[string]ModelPricing `json:"-"`
+	ModelLimits        map[string]ModelLimits  `json:"-"`
 	ConnectTimeout     time.Duration           `json:"-"`
+}
+
+// ModelLimits are deployment safety limits. ContextWindow includes input and
+// output tokens; MaxOutputTokens is the maximum output reservation for a call.
+type ModelLimits struct {
+	ContextWindow   int64
+	MaxOutputTokens int64
 }
 
 // ModelPricing uses USD per one million tokens. It intentionally lives in
@@ -30,36 +38,40 @@ type ModelPricing struct {
 }
 
 type Config struct {
-	HTTPAddr                string
-	DatabaseURL             string
-	DatabaseMaxOpenConns    int
-	DatabaseMaxIdleConns    int
-	DatabaseConnMaxLifetime time.Duration
-	DatabaseConnMaxIdleTime time.Duration
-	RedisURL                string
-	JWTSecret               string
-	JWTTTL                  time.Duration
-	CORSAllowedOrigins      []string
-	LogLevel                string
-	LogDir                  string
-	LogRetentionDays        int
-	MaxToolIterations       int
-	StreamConnectTimeout    time.Duration
-	StreamTTFTTimeout       time.Duration
-	StreamTotalTimeout      time.Duration
-	StreamCacheTTL          time.Duration
-	StreamCacheMaxEvents    int
-	EnableThinking          bool
-	ThinkingBudgetTokens    int
-	LLMTokenBudget          int64
-	LLMMaxOutputTokens      int64
-	LLMRateTokensPerMinute  int64
-	LLMRateBurst            int64
-	LLMIdempotencyTTL       time.Duration
-	LLMSyncMaxRetries       int
-	LLMRetryBackoff         time.Duration
-	SystemPrompt            string
-	Providers               []ProviderConfig
+	HTTPAddr                  string
+	DatabaseURL               string
+	DatabaseMaxOpenConns      int
+	DatabaseMaxIdleConns      int
+	DatabaseConnMaxLifetime   time.Duration
+	DatabaseConnMaxIdleTime   time.Duration
+	RedisURL                  string
+	JWTSecret                 string
+	JWTTTL                    time.Duration
+	CORSAllowedOrigins        []string
+	LogLevel                  string
+	LogDir                    string
+	LogRetentionDays          int
+	MaxToolIterations         int
+	StreamConnectTimeout      time.Duration
+	StreamTTFTTimeout         time.Duration
+	StreamTotalTimeout        time.Duration
+	StreamCacheTTL            time.Duration
+	StreamCacheMaxEvents      int
+	EnableThinking            bool
+	ThinkingBudgetTokens      int
+	LLMTokenBudget            int64
+	LLMMaxOutputTokens        int64
+	LLMRateTokensPerMinute    int64
+	LLMRateBurst              int64
+	LLMIdempotencyTTL         time.Duration
+	LLMSyncMaxRetries         int
+	LLMRetryBackoff           time.Duration
+	ContextSummaryEnabled     bool
+	ContextSummaryMaxTokens   int64
+	ContextKeepRecentMessages int
+	ContextSummaryMaxCalls    int
+	SystemPrompt              string
+	Providers                 []ProviderConfig
 }
 
 func Load() (Config, error) {
@@ -141,6 +153,9 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if llmMaxOutputTokens >= llmTokenBudget {
+		return Config{}, fmt.Errorf("LLM_MAX_OUTPUT_TOKENS must be smaller than LLM_TOKEN_BUDGET")
+	}
 	llmRateTokensPerMinute, err := nonNegativeInt64Env("LLM_RATE_TOKENS_PER_MINUTE", 120_000)
 	if err != nil {
 		return Config{}, err
@@ -164,43 +179,66 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	contextSummaryEnabled, err := boolEnv("CONTEXT_SUMMARY_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	contextSummaryMaxTokens, err := positiveInt64Env("CONTEXT_SUMMARY_MAX_TOKENS", 1024)
+	if err != nil {
+		return Config{}, err
+	}
+	contextKeepRecentMessages, err := positiveIntEnv("CONTEXT_KEEP_RECENT_MESSAGES", 8)
+	if err != nil {
+		return Config{}, err
+	}
+	contextSummaryMaxCalls, err := positiveIntEnv("CONTEXT_SUMMARY_MAX_CALLS", 2)
+	if err != nil {
+		return Config{}, err
+	}
+	if contextSummaryMaxCalls > 5 {
+		return Config{}, fmt.Errorf("CONTEXT_SUMMARY_MAX_CALLS must not exceed 5")
+	}
 
-	providers, err := configuredProviders(streamConnectTimeout)
+	providers, err := configuredProviders(streamConnectTimeout, llmTokenBudget, llmMaxOutputTokens)
 	if err != nil {
 		return Config{}, err
 	}
 
 	cfg := Config{
-		HTTPAddr:                env("HTTP_ADDR", ":8080"),
-		DatabaseURL:             env("DATABASE_URL", "postgres://agent:agent_dev_password@localhost:5432/agent_platform?sslmode=disable"),
-		DatabaseMaxOpenConns:    databaseMaxOpenConns,
-		DatabaseMaxIdleConns:    databaseMaxIdleConns,
-		DatabaseConnMaxLifetime: databaseConnMaxLifetime,
-		DatabaseConnMaxIdleTime: databaseConnMaxIdleTime,
-		RedisURL:                env("REDIS_URL", "redis://localhost:6379/0"),
-		JWTSecret:               os.Getenv("JWT_SECRET"),
-		JWTTTL:                  ttl,
-		CORSAllowedOrigins:      splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
-		LogLevel:                env("LOG_LEVEL", "INFO"),
-		LogDir:                  env("LOG_DIR", "./logs"),
-		LogRetentionDays:        logRetentionDays,
-		MaxToolIterations:       maxToolIterations,
-		StreamConnectTimeout:    streamConnectTimeout,
-		StreamTTFTTimeout:       streamTTFTTimeout,
-		StreamTotalTimeout:      streamTotalTimeout,
-		StreamCacheTTL:          streamCacheTTL,
-		StreamCacheMaxEvents:    streamCacheMaxEvents,
-		EnableThinking:          enableThinking,
-		ThinkingBudgetTokens:    thinkingBudgetTokens,
-		LLMTokenBudget:          llmTokenBudget,
-		LLMMaxOutputTokens:      llmMaxOutputTokens,
-		LLMRateTokensPerMinute:  llmRateTokensPerMinute,
-		LLMRateBurst:            llmRateBurst,
-		LLMIdempotencyTTL:       llmIdempotencyTTL,
-		LLMSyncMaxRetries:       llmSyncMaxRetries,
-		LLMRetryBackoff:         llmRetryBackoff,
-		SystemPrompt:            env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
-		Providers:               providers,
+		HTTPAddr:                  env("HTTP_ADDR", ":8080"),
+		DatabaseURL:               env("DATABASE_URL", "postgres://agent:agent_dev_password@localhost:5432/agent_platform?sslmode=disable"),
+		DatabaseMaxOpenConns:      databaseMaxOpenConns,
+		DatabaseMaxIdleConns:      databaseMaxIdleConns,
+		DatabaseConnMaxLifetime:   databaseConnMaxLifetime,
+		DatabaseConnMaxIdleTime:   databaseConnMaxIdleTime,
+		RedisURL:                  env("REDIS_URL", "redis://localhost:6379/0"),
+		JWTSecret:                 os.Getenv("JWT_SECRET"),
+		JWTTTL:                    ttl,
+		CORSAllowedOrigins:        splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
+		LogLevel:                  env("LOG_LEVEL", "INFO"),
+		LogDir:                    env("LOG_DIR", "./logs"),
+		LogRetentionDays:          logRetentionDays,
+		MaxToolIterations:         maxToolIterations,
+		StreamConnectTimeout:      streamConnectTimeout,
+		StreamTTFTTimeout:         streamTTFTTimeout,
+		StreamTotalTimeout:        streamTotalTimeout,
+		StreamCacheTTL:            streamCacheTTL,
+		StreamCacheMaxEvents:      streamCacheMaxEvents,
+		EnableThinking:            enableThinking,
+		ThinkingBudgetTokens:      thinkingBudgetTokens,
+		LLMTokenBudget:            llmTokenBudget,
+		LLMMaxOutputTokens:        llmMaxOutputTokens,
+		LLMRateTokensPerMinute:    llmRateTokensPerMinute,
+		LLMRateBurst:              llmRateBurst,
+		LLMIdempotencyTTL:         llmIdempotencyTTL,
+		LLMSyncMaxRetries:         llmSyncMaxRetries,
+		LLMRetryBackoff:           llmRetryBackoff,
+		ContextSummaryEnabled:     contextSummaryEnabled,
+		ContextSummaryMaxTokens:   contextSummaryMaxTokens,
+		ContextKeepRecentMessages: contextKeepRecentMessages,
+		ContextSummaryMaxCalls:    contextSummaryMaxCalls,
+		SystemPrompt:              env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
+		Providers:                 providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
 		return Config{}, fmt.Errorf("JWT_SECRET must contain at least 32 characters")
@@ -216,7 +254,7 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-func configuredProviders(connectTimeout time.Duration) ([]ProviderConfig, error) {
+func configuredProviders(connectTimeout time.Duration, defaultContextWindow, defaultMaxOutputTokens int64) ([]ProviderConfig, error) {
 	type providerDefinition struct {
 		id, label, kind, prefix, baseURL, models string
 	}
@@ -237,19 +275,63 @@ func configuredProviders(connectTimeout time.Duration) ([]ProviderConfig, error)
 		if err != nil {
 			return nil, err
 		}
+		models := splitCSV(env(definition.prefix+"_MODELS", definition.models))
+		limits, err := parseModelLimits(env(definition.prefix+"_MODEL_LIMITS", ""), models, ModelLimits{
+			ContextWindow: defaultContextWindow, MaxOutputTokens: defaultMaxOutputTokens,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("parse %s_MODEL_LIMITS: %w", definition.prefix, err)
+		}
 		result = append(result, ProviderConfig{
 			ID:                 definition.id,
 			Label:              definition.label,
 			Type:               definition.kind,
 			BaseURL:            strings.TrimRight(env(definition.prefix+"_BASE_URL", definition.baseURL), "/"),
 			APIKey:             os.Getenv(definition.prefix + "_API_KEY"),
-			Models:             splitCSV(env(definition.prefix+"_MODELS", definition.models)),
+			Models:             models,
 			StreamIncludeUsage: includeUsage,
 			ModelPricing:       pricing,
+			ModelLimits:        limits,
 			ConnectTimeout:     connectTimeout,
 		})
 	}
 	return result, nil
+}
+
+// parseModelLimits accepts comma-separated model:context_window:max_output
+// entries. Enabled models without an explicit entry receive the deployment
+// defaults so every model has a deterministic budget.
+func parseModelLimits(value string, models []string, defaults ModelLimits) (map[string]ModelLimits, error) {
+	if defaults.ContextWindow <= 0 || defaults.MaxOutputTokens <= 0 || defaults.MaxOutputTokens >= defaults.ContextWindow {
+		return nil, fmt.Errorf("default model limits are invalid")
+	}
+	limits := make(map[string]ModelLimits, len(models))
+	for _, model := range models {
+		limits[model] = defaults
+	}
+	if strings.TrimSpace(value) == "" {
+		return limits, nil
+	}
+	for _, item := range splitCSV(value) {
+		parts := strings.Split(item, ":")
+		if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" {
+			return nil, fmt.Errorf("%q must be model:context_window:max_output", item)
+		}
+		model := strings.TrimSpace(parts[0])
+		if _, enabled := limits[model]; !enabled {
+			return nil, fmt.Errorf("model %q is not present in the corresponding MODELS setting", model)
+		}
+		contextWindow, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || contextWindow <= 0 {
+			return nil, fmt.Errorf("%q has an invalid context window", item)
+		}
+		maxOutput, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		if err != nil || maxOutput <= 0 || maxOutput >= contextWindow {
+			return nil, fmt.Errorf("%q has an invalid max output", item)
+		}
+		limits[model] = ModelLimits{ContextWindow: contextWindow, MaxOutputTokens: maxOutput}
+	}
+	return limits, nil
 }
 
 func env(key, fallback string) string {

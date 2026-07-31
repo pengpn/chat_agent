@@ -45,12 +45,18 @@ type ToolFunctionCall struct {
 }
 
 type ChatRequest struct {
-	Model          string
-	Messages       []Message
-	Tools          []ToolDefinition
-	Thinking       *ThinkingConfig
-	Temperature    *float64
-	ResponseFormat *ResponseFormat
+	Model           string
+	Messages        []Message
+	Tools           []ToolDefinition
+	Thinking        *ThinkingConfig
+	Temperature     *float64
+	ResponseFormat  *ResponseFormat
+	MaxOutputTokens int64
+}
+
+type ModelLimits struct {
+	ContextWindow   int64
+	MaxOutputTokens int64
 }
 
 // ResponseFormat 描述最终回答必须满足的 JSON Schema。Gateway 会统一注入
@@ -136,6 +142,19 @@ type Resolver interface {
 	SupportsTools(id string) bool
 	SupportsThinking(id, model string) bool
 	CalculateCost(providerID, model string, usage TokenUsage) (int64, bool)
+	Limits(providerID, model string) (ModelLimits, bool)
+}
+
+func (r *Registry) Limits(providerID, model string) (ModelLimits, bool) {
+	cfg, ok := r.configs[providerID]
+	if !ok {
+		return ModelLimits{}, false
+	}
+	limits, ok := cfg.ModelLimits[model]
+	if !ok {
+		return ModelLimits{}, false
+	}
+	return ModelLimits{ContextWindow: limits.ContextWindow, MaxOutputTokens: limits.MaxOutputTokens}, true
 }
 
 type PublicProvider struct {
