@@ -22,7 +22,9 @@ type Repositories struct {
 type ChatRepository interface {
 	FindByIDForUser(ctx context.Context, userID, id string) (model.Conversation, error)
 	ListByConversationForUser(ctx context.Context, userID, conversationID string) ([]model.Message, error)
+	FindMessageByIDForUser(ctx context.Context, userID, conversationID, messageID string) (model.Message, error)
 	CreateTurn(ctx context.Context, userMessage, assistantMessage *model.Message) error
+	CreateRegeneration(ctx context.Context, userID, targetMessageID, replyToMessageID string, assistant *model.Message) error
 	Finalize(ctx context.Context, id string, completion model.MessageCompletion) (model.Message, error)
 	SaveConversationSummaryVersion(ctx context.Context, userID string, version *model.ConversationSummaryVersion, activate bool) error
 }
@@ -50,11 +52,22 @@ func (r *Repositories) CreateTurn(ctx context.Context, userMessage, assistantMes
 		if err := tx.Messages.Create(ctx, userMessage); err != nil {
 			return err
 		}
+		assistantMessage.ReplyToMessageID = &userMessage.ID
+		assistantMessage.ResponseVersion = 1
+		assistantMessage.IsActiveResponse = true
 		if err := tx.Messages.Create(ctx, assistantMessage); err != nil {
 			return err
 		}
 		return tx.Conversations.Touch(ctx, userMessage.ConversationID)
 	})
+}
+
+func (r *Repositories) FindMessageByIDForUser(ctx context.Context, userID, conversationID, messageID string) (model.Message, error) {
+	return r.Messages.FindByIDForUser(ctx, userID, conversationID, messageID)
+}
+
+func (r *Repositories) CreateRegeneration(ctx context.Context, userID, targetMessageID, replyToMessageID string, assistant *model.Message) error {
+	return r.Messages.CreateRegeneration(ctx, userID, targetMessageID, replyToMessageID, assistant)
 }
 
 func (r *Repositories) FindByIDForUser(ctx context.Context, userID, id string) (model.Conversation, error) {

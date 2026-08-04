@@ -13,6 +13,21 @@ import (
 	"github.com/example/agent-platform/backend/internal/provider"
 )
 
+func TestContextHistoryExcludesInactiveResponseVersions(t *testing.T) {
+	userID := "user-message"
+	messages := []model.Message{
+		{ID: userID, Role: "user", Content: "问题", Status: "complete"},
+		{ID: "answer-v1", Role: "assistant", Content: "旧回答", Status: "complete", ReplyToMessageID: &userID, ResponseVersion: 1, IsActiveResponse: false},
+		{ID: "later-user", Role: "user", Content: "后续问题", Status: "complete"},
+		{ID: "answer-v2", Role: "assistant", Content: "当前回答", Status: "complete", ReplyToMessageID: &userID, ResponseVersion: 2, IsActiveResponse: true},
+	}
+
+	_, history := contextHistory(model.Conversation{}, messages)
+	if len(history) != 3 || history[0].ID != userID || history[1].ID != "answer-v2" || history[2].ID != "later-user" {
+		t.Fatalf("history = %#v", history)
+	}
+}
+
 func TestContextManagementSummarizesOldHistoryAndAccountsUsage(t *testing.T) {
 	repository := &fakeChatRepository{history: contextTestHistory(10, 24)}
 	client := &contextTestProvider{}

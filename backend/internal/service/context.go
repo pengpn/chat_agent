@@ -146,7 +146,7 @@ func (s *ChatService) prepareContext(ctx context.Context, session *ChatSession, 
 
 			throughMessageID := history[count-1].ID
 			version := attempt.version(session.UserMessage.ConversationID, throughMessageID, target)
-			if persistErr := s.repository.SaveConversationSummaryVersion(ctx, session.UserID, &version, attempt.accepted); persistErr != nil {
+			if persistErr := s.saveSummaryVersion(ctx, session, &version, attempt.accepted); persistErr != nil {
 				logger.Warn(ctx, "persist conversation summary version failed",
 					logger.String("conversation_id", session.UserMessage.ConversationID),
 					logger.String("through_message_id", throughMessageID),
@@ -215,6 +215,16 @@ func (s *ChatService) prepareContext(ctx context.Context, session *ChatSession, 
 	return result, nil
 }
 
+func (s *ChatService) saveSummaryVersion(ctx context.Context, session *ChatSession, version *model.ConversationSummaryVersion, activate bool) error {
+	// Regeneration uses a historical prefix. Persisting its summary as the
+	// conversation's rolling summary could move the global summary checkpoint
+	// backwards and duplicate later context.
+	if session.IsRegeneration {
+		return nil
+	}
+	return s.repository.SaveConversationSummaryVersion(ctx, session.UserID, version, activate)
+}
+
 // contextHistory 从会话记录还原「摘要 + 摘要之后的原文历史」。
 // SummaryThroughMessageID 指向摘要已覆盖到的最后一条消息；找不到该锚点时丢弃摘要，回退为全量历史。
 func contextHistory(conversation model.Conversation, persisted []model.Message) (string, []model.Message) {
@@ -236,8 +246,28 @@ func contextHistory(conversation model.Conversation, persisted []model.Message) 
 	} else {
 		summary = ""
 	}
-	history := make([]model.Message, 0, len(persisted)-start)
-	for _, message := range persisted[start:] {
+	source := persisted[start:]
+	history := make([]model.Message, 0, len(source))
+	activeByReply := make(map[string]model.Message)
+	for _, message := range source {
+		if message.Role == "assistant" && message.ReplyToMessageID != nil && message.IsActiveResponse {
+			activeByReply[*message.ReplyToMessageID] = message
+		}
+	}
+	seenGroups := make(map[string]struct{})
+	for _, message := range source {
+		if message.Role == "assistant" && message.ReplyToMessageID != nil {
+			groupID := *message.ReplyToMessageID
+			if _, seen := seenGroups[groupID]; seen {
+				continue
+			}
+			seenGroups[groupID] = struct{}{}
+			active, ok := activeByReply[groupID]
+			if !ok {
+				continue
+			}
+			message = active
+		}
 		if message.Status == "complete" || message.Status == "stopped" {
 			history = append(history, message)
 		}

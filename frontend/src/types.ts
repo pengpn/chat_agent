@@ -24,11 +24,15 @@ export interface Message {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   think?: string
-	structuredOutput?: unknown
+  replyToMessageId?: string
+  responseVersion?: number
+  isActiveResponse?: boolean
+  regeneratedFromMessageId?: string
+  structuredOutput?: unknown
   provider?: string
   model?: string
-	status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error'
-	finishReason?: string
+  status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error'
+  finishReason?: string
   createdAt: string
 }
 

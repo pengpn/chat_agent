@@ -10,6 +10,11 @@ type Message struct {
 	Role             string        `json:"role" gorm:"type:text;not null;check:messages_role_check,role IN ('system', 'user', 'assistant', 'tool')"`
 	Content          string        `json:"content" gorm:"type:text;not null;default:''"`
 	Think            string        `json:"think,omitempty" gorm:"type:text;not null;default:''"`
+	ReplyToMessageID *string       `json:"replyToMessageId,omitempty" gorm:"type:uuid;index"`
+	ResponseVersion  int64         `json:"responseVersion,omitempty" gorm:"not null;default:0"`
+	IsActiveResponse bool          `json:"isActiveResponse,omitempty" gorm:"not null;default:false;index"`
+	RegeneratedFrom  *string       `json:"regeneratedFromMessageId,omitempty" gorm:"type:uuid;index"`
+	GenerationKey    *string       `json:"-" gorm:"type:text;uniqueIndex"`
 	StructuredOutput JSONDocument  `json:"structuredOutput,omitempty" gorm:"type:jsonb"`
 	Provider         string        `json:"provider,omitempty" gorm:"type:text"`
 	Model            string        `json:"model,omitempty" gorm:"type:text"`

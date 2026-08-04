@@ -7,6 +7,7 @@
 学习文档：
 
 - [上下文 Token 管理实现解析](./docs/context-token-management.md)
+- [重新生成回答实现解析](./docs/regenerate-answer.md)
 
 实现思路借鉴了优秀开源项目中经过验证的分层理念：前端会话体验参考 [LibreChat](https://github.com/danny-avila/LibreChat) / [Open WebUI](https://github.com/open-webui/open-webui) 的多 Provider 对话模式；Provider 使用类似 LangChain 的统一消息与流事件接口。这里没有复制它们的代码，而是以更小、更适合学习的 Go 版本重新实现。
 
@@ -25,6 +26,7 @@
 - Zap 日志同时输出到 stdout 与按日期轮转的本地 JSON 日志文件
 - `LLMGateway` 统一模型调用：Token 预算预估、令牌桶限流、同步重试、幂等、流序号和观测
 - 长对话上下文管理：模型级窗口、Token 裁剪、持久化滚动摘要和摘要失败降级
+- 回答重新生成：复用原问题上下文、保留多个回答版本、版本切换、停止生成和幂等防重
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL
 
@@ -94,6 +96,8 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 | GET | `/api/v1/conversations/:id/messages` | 获取消息历史 |
 | POST | `/api/v1/conversations/:id/messages` | SSE 流式发送消息 |
 | POST | `/api/v1/conversations/:id/messages/chat` | 非流式发送消息，返回完整结果 |
+| POST | `/api/v1/conversations/:id/messages/:messageId/regenerate` | SSE 重新生成指定 assistant 回答并创建新版本 |
+| PATCH | `/api/v1/conversations/:id/messages/:messageId/activate` | 切换同一问题下的激活回答版本 |
 | GET | `/api/v1/messages/:messageId/stream?afterSequence=N` | 按序号补发短期缓存中的 SSE 片段 |
 
 流式接口依次发送 `metadata`、多个 `think`（模型思考增量）、多个 `delta`（最终回答增量）、最后的 `done` 事件。每个事件都携带 `messageId`、递增 `sequence`，并使用同值的 SSE `id` 字段。非正常终止发送 `interrupted` 或 `error`。

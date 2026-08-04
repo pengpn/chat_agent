@@ -64,12 +64,22 @@ type ChatSession struct {
 	AssistantMessage         model.Message
 	OperationID              string
 	UserID                   string
+	IsRegeneration           bool
+	RegeneratedFromMessageID string
 	request                  provider.ChatRequest
 	preparationUsage         provider.TokenUsage
 	preparationUsageReported bool
 	preparationCostNanoUSD   int64
 	preparationCostKnown     bool
 	preparationCostTracked   bool
+}
+
+type RegenerateInput struct {
+	Provider       string
+	Model          string
+	Temperature    *float64
+	OutputFormat   string
+	IdempotencyKey string
 }
 
 func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, outputFormats *outputformat.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig, contextConfig ContextConfig) *ChatService {
@@ -194,6 +204,168 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	session.preparationCostTracked = contextResult.costTracked
 	session.request = request
 	return session, nil
+}
+
+// PrepareRegeneration creates only a new assistant version. The original user
+// message is reused and the model context stops at that user message, so later
+// turns and previous answer versions cannot leak into the regenerated answer.
+func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversationID, targetMessageID string, input RegenerateInput) (*ChatSession, error) {
+	if input.Temperature != nil && (*input.Temperature < 0 || *input.Temperature > 2) {
+		return nil, ErrInvalidTemperature
+	}
+	conversation, err := s.repository.FindByIDForUser(ctx, userID, conversationID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, ErrConversationNotFound
+		}
+		return nil, err
+	}
+	target, err := s.repository.FindMessageByIDForUser(ctx, userID, conversationID, targetMessageID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, ErrMessageNotFound
+		}
+		return nil, err
+	}
+	if target.Role != "assistant" || target.Status == "streaming" {
+		return nil, ErrMessageNotRegenerable
+	}
+	if strings.TrimSpace(input.Provider) == "" {
+		input.Provider = target.Provider
+	}
+	if strings.TrimSpace(input.Model) == "" {
+		input.Model = target.Model
+	}
+	if err := s.gateway.Validate(input.Provider, input.Model); err != nil {
+		return nil, &ProviderSelectionError{err: err}
+	}
+	var responseFormat *provider.ResponseFormat
+	if formatID := strings.TrimSpace(input.OutputFormat); formatID != "" {
+		var ok bool
+		responseFormat, ok = s.outputFormats.Get(formatID)
+		if !ok {
+			return nil, ErrOutputFormatNotFound
+		}
+		if err := s.gateway.ValidateResponseFormat(responseFormat); err != nil {
+			return nil, err
+		}
+	}
+	history, err := s.repository.ListByConversationForUser(ctx, userID, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	targetIndex := messageIndex(history, target.ID)
+	if targetIndex < 0 {
+		return nil, ErrMessageNotFound
+	}
+	replyToID := ""
+	if target.ReplyToMessageID != nil {
+		replyToID = *target.ReplyToMessageID
+	}
+	userIndex := messageIndex(history, replyToID)
+	if userIndex < 0 {
+		for index := targetIndex - 1; index >= 0; index-- {
+			if history[index].Role == "user" {
+				userIndex = index
+				replyToID = history[index].ID
+				break
+			}
+		}
+	}
+	if userIndex < 0 || userIndex >= targetIndex {
+		return nil, ErrMessageNotRegenerable
+	}
+
+	operationID := llmgateway.OperationID(userID, conversationID+":"+targetMessageID, strings.TrimSpace(input.IdempotencyKey))
+	if err := s.gateway.Begin(ctx, operationID); err != nil {
+		return nil, err
+	}
+	var generationKey *string
+	if operationID != "" {
+		generationKey = &operationID
+	}
+	session := &ChatSession{
+		OperationID: operationID,
+		UserID:      userID,
+		UserMessage: history[userIndex],
+		AssistantMessage: model.Message{
+			ConversationID: conversationID,
+			Role:           "assistant",
+			Provider:       input.Provider,
+			Model:          input.Model,
+			Status:         "streaming",
+			GenerationKey:  generationKey,
+		},
+		IsRegeneration:           true,
+		RegeneratedFromMessageID: targetMessageID,
+	}
+	if err := s.repository.CreateRegeneration(ctx, userID, targetMessageID, replyToID, &session.AssistantMessage); err != nil {
+		s.gateway.Abandon(operationID)
+		if errors.Is(err, domain.ErrAlreadyExists) {
+			return nil, llmgateway.ErrIdempotencyCompleted
+		}
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, ErrMessageNotFound
+		}
+		return nil, err
+	}
+
+	requestMessages := make([]provider.Message, 0, 2)
+	if system := strings.TrimSpace(s.systemPrompt); system != "" {
+		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
+	}
+	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
+	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
+	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
+		request.Tools = s.tools.Definitions()
+	}
+	if s.thinking != nil && s.thinking.Enabled && s.gateway.SupportsThinking(input.Provider, input.Model) {
+		thinking := *s.thinking
+		request.Thinking = &thinking
+	}
+	// A stored summary may cover messages after the selected answer. Reusing it
+	// would violate regeneration's historical cutoff, so rebuild from the exact
+	// prefix before the original user message.
+	conversation.Summary = ""
+	conversation.SummaryThroughMessageID = nil
+	contextResult, contextErr := s.prepareContext(ctx, session, conversation, history[:userIndex], request)
+	if contextErr != nil {
+		usageData := model.MessageUsage{}
+		if contextResult.usageReported {
+			usageData.InputTokens = contextResult.usage.InputTokens
+			usageData.OutputTokens = contextResult.usage.OutputTokens
+			usageData.TotalTokens = contextResult.usage.TotalTokens
+			usageData.UsageReported = true
+			usageData.CostNanoUSD = contextResult.costNanoUSD
+			usageData.CostKnown = contextResult.costKnown
+		}
+		finishReason := "context_preparation_failed"
+		if errors.Is(contextErr, llmgateway.ErrTokenBudgetExceeded) {
+			finishReason = "token_budget_exceeded"
+		}
+		_, _ = s.finalize(session.AssistantMessage.ID, model.MessageCompletion{Status: "error", FinishReason: finishReason, Usage: usageData})
+		s.gateway.Abandon(operationID)
+		return nil, contextErr
+	}
+	session.preparationUsage = contextResult.usage
+	session.preparationUsageReported = contextResult.usageReported
+	session.preparationCostNanoUSD = contextResult.costNanoUSD
+	session.preparationCostKnown = contextResult.costKnown
+	session.preparationCostTracked = contextResult.costTracked
+	session.request = contextResult.request
+	return session, nil
+}
+
+func messageIndex(messages []model.Message, id string) int {
+	if id == "" {
+		return -1
+	}
+	for index := range messages {
+		if messages[index].ID == id {
+			return index
+		}
+	}
+	return -1
 }
 
 // 业务编排层，负责多轮模型调用、工具执行、内容聚合、用量统计和数据库落库。

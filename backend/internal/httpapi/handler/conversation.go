@@ -47,6 +47,21 @@ func (h *Handler) ListMessages(c *gin.Context) {
 	response.WriteOKResp(c, gin.H{"messages": items})
 }
 
+func (h *Handler) ActivateResponse(c *gin.Context) {
+	message, err := h.conversations.ActivateResponse(c.Request.Context(), currentUserID(c), c.Param("conversationID"), c.Param("messageID"))
+	switch {
+	case errors.Is(err, service.ErrMessageNotFound):
+		response.WriteErrorResp(c, http.StatusNotFound, "回答不存在")
+	case errors.Is(err, service.ErrResponseNotSwitchable):
+		response.WriteErrorResp(c, http.StatusConflict, "该回答没有可切换的版本")
+	case err != nil:
+		logger.Error(c.Request.Context(), "activate response version failed", logger.Err(err))
+		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
+	default:
+		response.WriteOKResp(c, gin.H{"message": message})
+	}
+}
+
 func (h *Handler) UpdateConversation(c *gin.Context) {
 	var input struct {
 		Title string `json:"title"`

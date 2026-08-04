@@ -4,6 +4,7 @@ import AuthPanel from '@/components/AuthPanel.vue'
 import ChatPanel from '@/components/ChatPanel.vue'
 import ConversationSidebar from '@/components/ConversationSidebar.vue'
 import {
+  activateResponseVersion,
   clearSession,
   createConversation,
   deleteConversation,
@@ -14,7 +15,9 @@ import {
   renameConversation,
   restoreSession,
   saveSession,
-  streamMessage
+  streamMessage,
+  streamRegeneratedMessage,
+  type StreamHandlers
 } from '@/lib/api'
 import type { AuthSession, Conversation, Message, ModelProvider, User } from '@/types'
 
@@ -116,8 +119,51 @@ async function removeConversation(conversation: Conversation) {
 }
 
 async function send(content: string, provider: string, model: string) {
-	if (!activeID.value || streamControllers.has(activeID.value)) return
+	if (!activeID.value) return
 	const conversationID = activeID.value
+	await runStreamingRequest(conversationID, content, (handlers, signal, idempotencyKey) =>
+		streamMessage(conversationID, { content, provider, model }, handlers, signal, idempotencyKey))
+}
+
+async function regenerate(message: Message, provider: string, model: string) {
+	if (!activeID.value || message.role !== 'assistant') return
+	const conversationID = activeID.value
+	linkLegacyResponseToUser(message)
+	await runStreamingRequest(conversationID, '', (handlers, signal, idempotencyKey) =>
+		streamRegeneratedMessage(conversationID, message.id, { provider, model }, handlers, signal, idempotencyKey))
+}
+
+function linkLegacyResponseToUser(message: Message) {
+	if (message.replyToMessageId) return
+	const index = messages.value.findIndex((item) => item.id === message.id)
+	for (let current = index - 1; current >= 0; current--) {
+		if (messages.value[current].role !== 'user') continue
+		messages.value = messages.value.map((item) => item.id === message.id ? {
+			...item,
+			replyToMessageId: messages.value[current].id,
+			responseVersion: 1,
+			isActiveResponse: true
+		} : item)
+		return
+	}
+}
+
+async function switchResponseVersion(message: Message) {
+	if (!activeID.value || pending.value) return
+	try {
+		const selected = await activateResponseVersion(activeID.value, message.id)
+		markResponseActive(selected)
+	} catch (cause) {
+		error.value = messageFor(cause)
+	}
+}
+
+async function runStreamingRequest(
+	conversationID: string,
+	firstMessageContent: string,
+	start: (handlers: StreamHandlers, signal: AbortSignal, idempotencyKey: string) => Promise<void>
+) {
+	if (streamControllers.has(conversationID)) return
 	const controller = new AbortController()
 	const idempotencyKey = crypto.randomUUID()
   error.value = ''
@@ -125,12 +171,13 @@ async function send(content: string, provider: string, model: string) {
   streamControllers.set(conversationID, controller)
   let receivedDone = false
   try {
-	await streamMessage(conversationID, { content, provider, model }, {
+	await start({
       onMetadata(userMessage, assistantMessage) {
+		markResponseActive(assistantMessage)
 		liveTurns.set(conversationID, { userMessage, assistantMessage })
 		if (activeID.value === conversationID) {
 		  messages.value = mergeLiveTurn(messages.value, conversationID)
-		  setConversationTitleFromFirstMessage(content)
+		  if (firstMessageContent) setConversationTitleFromFirstMessage(firstMessageContent)
 		}
       },
       onThink(delta) {
@@ -198,7 +245,16 @@ function stop() {
 }
 
 function replaceMessage(updated: Message) {
+	markResponseActive(updated)
   messages.value = messages.value.map((item) => item.id === updated.id ? updated : item)
+}
+
+function markResponseActive(selected: Message) {
+	if (!selected.replyToMessageId || !selected.isActiveResponse) return
+	messages.value = messages.value.map((item) =>
+		item.role === 'assistant' && item.replyToMessageId === selected.replyToMessageId
+			? { ...item, isActiveResponse: item.id === selected.id }
+			: item)
 }
 
 function mergeLiveTurn(items: Message[], conversationID: string): Message[] {
@@ -273,6 +329,8 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       :error="error"
       :notice="streamNotice"
       @send="send"
+	  @regenerate="regenerate"
+	  @switch-version="switchResponseVersion"
       @stop="stop"
     />
   </div>

@@ -26,6 +26,36 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 	if !ok {
 		return
 	}
+	h.streamPreparedSession(c, flusher, session)
+}
+
+func (h *Handler) RegenerateMessage(c *gin.Context) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器不支持流式响应")
+		return
+	}
+	var input struct {
+		Provider     string   `json:"provider"`
+		Model        string   `json:"model"`
+		Temperature  *float64 `json:"temperature"`
+		OutputFormat string   `json:"outputFormat"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	session, err := h.chat.PrepareRegeneration(c.Request.Context(), currentUserID(c), c.Param("conversationID"), c.Param("messageID"), service.RegenerateInput{
+		Provider: input.Provider, Model: input.Model, Temperature: input.Temperature,
+		OutputFormat: input.OutputFormat, IdempotencyKey: c.GetHeader("Idempotency-Key"),
+	})
+	if !h.handlePrepareError(c, err) {
+		return
+	}
+	h.streamPreparedSession(c, flusher, session)
+}
+
+func (h *Handler) streamPreparedSession(c *gin.Context, flusher http.Flusher, session *service.ChatSession) {
 	c.Header("Content-Type", "text/event-stream; charset=utf-8")
 	c.Header("Cache-Control", "no-cache, no-transform")
 	c.Header("Connection", "keep-alive")
@@ -34,7 +64,7 @@ func (h *Handler) StreamMessage(c *gin.Context) {
 	messageID := session.AssistantMessage.ID
 	h.streams.Start(messageID, currentUserID(c))
 	h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "metadata", map[string]any{
-		"userMessage": session.UserMessage, "assistantMessage": session.AssistantMessage,
+		"userMessage": session.UserMessage, "assistantMessage": session.AssistantMessage, "regeneration": session.IsRegeneration,
 	}, false)
 
 	var modelErr error
@@ -182,41 +212,41 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		OutputFormat:   input.OutputFormat,
 		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 	})
+	return session, h.handlePrepareError(c, err)
+}
+
+func (h *Handler) handlePrepareError(c *gin.Context, err error) bool {
 	var providerSelectionError *service.ProviderSelectionError
 	switch {
+	case err == nil:
+		return true
 	case errors.Is(err, service.ErrInvalidMessageLength):
 		response.WriteErrorResp(c, http.StatusBadRequest, "消息长度应在 1 到 100000 个字符之间")
-		return nil, false
 	case errors.Is(err, service.ErrInvalidTemperature):
 		response.WriteErrorResp(c, http.StatusBadRequest, "temperature 必须在 0 到 2 之间")
-		return nil, false
 	case errors.Is(err, service.ErrOutputFormatNotFound):
 		response.WriteErrorResp(c, http.StatusBadRequest, "不支持的输出格式")
-		return nil, false
 	case errors.Is(err, llmgateway.ErrInvalidResponseFormat):
 		response.WriteErrorResp(c, http.StatusBadRequest, err.Error())
-		return nil, false
 	case errors.Is(err, llmgateway.ErrTokenBudgetExceeded):
 		response.WriteErrorResp(c, http.StatusUnprocessableEntity, "当前消息超过模型可用上下文，请缩短内容后重试")
-		return nil, false
 	case errors.Is(err, service.ErrConversationNotFound):
 		response.WriteErrorResp(c, http.StatusNotFound, "对话不存在")
-		return nil, false
+	case errors.Is(err, service.ErrMessageNotFound):
+		response.WriteErrorResp(c, http.StatusNotFound, "回答不存在")
+	case errors.Is(err, service.ErrMessageNotRegenerable):
+		response.WriteErrorResp(c, http.StatusConflict, "当前回答不能重新生成")
 	case errors.Is(err, llmgateway.ErrIdempotencyInProgress):
 		response.WriteErrorResp(c, http.StatusConflict, "相同消息正在处理，请等待本次请求完成")
-		return nil, false
 	case errors.Is(err, llmgateway.ErrIdempotencyCompleted):
 		response.WriteErrorResp(c, http.StatusConflict, "相同消息已经处理完成，请刷新会话查看结果")
-		return nil, false
 	case errors.As(err, &providerSelectionError):
 		response.WriteErrorResp(c, http.StatusBadRequest, providerSelectionError.Error())
-		return nil, false
 	case err != nil:
 		logger.Error(c.Request.Context(), "prepare message stream failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
-		return nil, false
 	}
-	return session, true
+	return false
 }
 
 func (h *Handler) logChatCompleted(c *gin.Context, completed model.Message, status string) {
@@ -233,6 +263,8 @@ func (h *Handler) logChatCompleted(c *gin.Context, completed model.Message, stat
 		logger.Bool("usage_reported", completed.UsageReported),
 		logger.Int64("cost_nano_usd", completed.CostNanoUSD),
 		logger.Bool("cost_known", completed.CostKnown),
+		logger.Bool("is_regeneration", completed.RegeneratedFrom != nil),
+		logger.Int64("response_version", completed.ResponseVersion),
 	)
 }
 

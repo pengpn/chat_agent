@@ -88,12 +88,14 @@ export async function listMessages(conversationID: string): Promise<Message[]> {
 }
 
 export type ChatPayload = {
-	content: string
-	provider: string
-	model: string
-	temperature?: number
-	outputFormat?: string
+  content: string
+  provider: string
+  model: string
+  temperature?: number
+  outputFormat?: string
 }
+
+export type RegeneratePayload = Omit<ChatPayload, 'content'>
 
 // chatMessage is the non-streaming counterpart to streamMessage. It waits for
 // the full model result, including any model-provided reasoning in `think`.
@@ -105,7 +107,7 @@ export async function chatMessage(conversationID: string, payload: ChatPayload, 
 	})
 }
 
-type StreamHandlers = {
+export type StreamHandlers = {
   onMetadata: (userMessage: Message, assistantMessage: Message) => void
   onThink: (content: string) => void
   onDelta: (content: string) => void
@@ -128,7 +130,32 @@ export async function streamMessage(
   signal: AbortSignal,
   idempotencyKey: string
 ): Promise<void> {
-  const response = await fetch(`/api/v1/conversations/${conversationID}/messages`, {
+  return streamRequest(`/api/v1/conversations/${conversationID}/messages`, payload, handlers, signal, idempotencyKey)
+}
+
+export async function streamRegeneratedMessage(
+  conversationID: string,
+  messageID: string,
+  payload: RegeneratePayload,
+  handlers: StreamHandlers,
+  signal: AbortSignal,
+  idempotencyKey: string
+): Promise<void> {
+  return streamRequest(`/api/v1/conversations/${conversationID}/messages/${messageID}/regenerate`, payload, handlers, signal, idempotencyKey)
+}
+
+export async function activateResponseVersion(conversationID: string, messageID: string): Promise<Message> {
+  return (await request<{ message: Message }>(`/api/v1/conversations/${conversationID}/messages/${messageID}/activate`, { method: 'PATCH' })).message
+}
+
+async function streamRequest(
+  path: string,
+  payload: ChatPayload | RegeneratePayload,
+  handlers: StreamHandlers,
+  signal: AbortSignal,
+  idempotencyKey: string
+): Promise<void> {
+  const response = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Accept: 'text/event-stream', 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(payload),

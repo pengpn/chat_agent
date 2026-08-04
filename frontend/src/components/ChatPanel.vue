@@ -14,6 +14,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   send: [content: string, provider: string, model: string]
+  regenerate: [message: Message, provider: string, model: string]
+  switchVersion: [message: Message]
   stop: []
 }>()
 
@@ -24,6 +26,26 @@ const viewport = ref<HTMLElement | null>(null)
 
 const models = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.models ?? [])
 const providerLabel = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.label ?? '选择模型')
+const displayMessages = computed(() => {
+  const groups = new Map<string, Message[]>()
+  for (const message of props.messages) {
+    if (message.role !== 'assistant' || !message.replyToMessageId) continue
+    const versions = groups.get(message.replyToMessageId) ?? []
+    versions.push(message)
+    groups.set(message.replyToMessageId, versions)
+  }
+  for (const versions of groups.values()) versions.sort((a, b) => (a.responseVersion || 1) - (b.responseVersion || 1))
+
+  const seen = new Set<string>()
+  return props.messages.flatMap((message) => {
+    if (message.role !== 'assistant' || !message.replyToMessageId) return [{ message, versions: [message] }]
+    if (seen.has(message.replyToMessageId)) return []
+    seen.add(message.replyToMessageId)
+    const versions = groups.get(message.replyToMessageId) ?? [message]
+    const active = [...versions].reverse().find((item) => item.isActiveResponse) ?? versions.at(-1) ?? message
+    return [{ message: active, versions }]
+  })
+})
 
 watch(() => props.providers, (providers) => {
   if (!providers.length) return
@@ -49,6 +71,18 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 function roleName(message: Message) { return message.role === 'user' ? '你' : message.provider ? `${message.provider} · ${message.model}` : '智能助理' }
+
+function regenerate(message: Message) {
+  if (props.pending || !selectedProvider.value || !selectedModel.value) return
+  emit('regenerate', message, selectedProvider.value, selectedModel.value)
+}
+
+function switchVersion(versions: Message[], current: Message, offset: number) {
+  if (props.pending) return
+  const index = versions.findIndex((item) => item.id === current.id)
+  const target = versions[index + offset]
+  if (target) emit('switchVersion', target)
+}
 </script>
 
 <template>
@@ -73,22 +107,32 @@ function roleName(message: Message) { return message.role === 'user' ? '你' : m
         <h1>从一个问题开始</h1>
         <p>你的每一段对话都会保留上下文，方便随时继续。</p>
       </section>
-      <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
-        <div class="message-meta"><span class="message-avatar" :class="{ agent: message.role !== 'user' }">{{ message.role === 'user' ? '你' : 'a' }}</span>{{ roleName(message) }}</div>
-        <details v-if="message.think" class="message-think" :open="message.status === 'streaming'">
+      <article v-for="entry in displayMessages" :key="entry.message.replyToMessageId || entry.message.id" class="message" :class="entry.message.role">
+        <div class="message-meta"><span class="message-avatar" :class="{ agent: entry.message.role !== 'user' }">{{ entry.message.role === 'user' ? '你' : 'a' }}</span>{{ roleName(entry.message) }}</div>
+        <details v-if="entry.message.think" class="message-think" :open="entry.message.status === 'streaming'">
           <summary>思考过程</summary>
-          <div class="message-think-content">{{ message.think }}</div>
+          <div class="message-think-content">{{ entry.message.think }}</div>
         </details>
-		<pre v-if="message.structuredOutput !== undefined && message.structuredOutput !== null" class="structured-output"><code>{{ JSON.stringify(message.structuredOutput, null, 2) }}</code></pre>
-		<MarkdownContent v-else :content="message.content" /><span v-if="message.status === 'streaming'" class="cursor" />
-		<p v-if="message.status === 'interrupted'" class="message-status">回答已中断，可重新生成。</p>
-        <p v-if="message.status === 'error'" class="message-status">这次回答未能完成，请重试。</p>
+		<pre v-if="entry.message.structuredOutput !== undefined && entry.message.structuredOutput !== null" class="structured-output"><code>{{ JSON.stringify(entry.message.structuredOutput, null, 2) }}</code></pre>
+		<MarkdownContent v-else :content="entry.message.content" /><span v-if="entry.message.status === 'streaming'" class="cursor" />
+		<p v-if="entry.message.status === 'interrupted'" class="message-status">回答已中断，可重新生成。</p>
+        <p v-if="entry.message.status === 'error'" class="message-status">这次回答未能完成，请重试。</p>
+        <div v-if="entry.message.role === 'assistant'" class="response-actions">
+          <div v-if="entry.versions.length > 1" class="response-version" aria-label="回答版本切换">
+            <button :disabled="pending || entry.message.id === entry.versions[0]?.id" aria-label="上一个回答版本" @click="switchVersion(entry.versions, entry.message, -1)">‹</button>
+            <span aria-live="polite">{{ entry.versions.findIndex((item) => item.id === entry.message.id) + 1 }} / {{ entry.versions.length }}</span>
+            <button :disabled="pending || entry.message.id === entry.versions.at(-1)?.id" aria-label="下一个回答版本" @click="switchVersion(entry.versions, entry.message, 1)">›</button>
+          </div>
+          <button class="regenerate-button" :disabled="pending || entry.message.status === 'streaming'" @click="regenerate(entry.message)">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" /></svg>重新生成
+          </button>
+        </div>
       </article>
     </div>
 
     <footer class="composer-wrap">
-      <p v-if="notice" class="stream-notice">{{ notice }}</p>
-      <p v-if="error" class="stream-error">{{ error }}</p>
+      <p v-if="notice" class="stream-notice" role="status" aria-live="polite">{{ notice }}</p>
+      <p v-if="error" class="stream-error" role="alert">{{ error }}</p>
       <div v-if="!providers.length" class="configuration-notice">当前工作空间暂未配置可用模型，请联系工作空间管理员。</div>
       <div class="composer" :class="{ disabled: !conversation || !providers.length }">
         <textarea v-model="draft" :disabled="!conversation || !providers.length || pending" placeholder="给 Agent 一个任务…" rows="1" @keydown="onKeydown" />

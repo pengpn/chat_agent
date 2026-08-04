@@ -15,6 +15,9 @@ var (
 	ErrInvalidMessageLength   = errors.New("invalid message length")
 	ErrInvalidTemperature     = errors.New("invalid temperature")
 	ErrOutputFormatNotFound   = errors.New("output format not found")
+	ErrMessageNotFound        = errors.New("message not found")
+	ErrMessageNotRegenerable  = errors.New("message cannot be regenerated")
+	ErrResponseNotSwitchable  = errors.New("response version cannot be switched")
 )
 
 // ProviderSelectionError indicates a client selected a provider or model that

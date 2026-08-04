@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/example/agent-platform/backend/internal/database/model"
+	"github.com/example/agent-platform/backend/internal/domain"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/tool"
@@ -209,6 +210,38 @@ func TestChatServiceExecutesToolAndContinuesModelStream(t *testing.T) {
 	}
 }
 
+func TestPrepareRegenerationUsesOriginalUserAndStopsContextBeforeOldAnswer(t *testing.T) {
+	u1, u2 := "user-1", "user-2"
+	repository := &fakeChatRepository{
+		conversation: model.Conversation{ID: "conversation-1"},
+		history: []model.Message{
+			{ID: u1, ConversationID: "conversation-1", Role: "user", Content: "第一问", Status: "complete"},
+			{ID: "assistant-1", ConversationID: "conversation-1", Role: "assistant", Content: "第一答", Status: "complete", ReplyToMessageID: &u1, ResponseVersion: 1, IsActiveResponse: true},
+			{ID: u2, ConversationID: "conversation-1", Role: "user", Content: "原问题", Status: "complete"},
+			{ID: "assistant-2", ConversationID: "conversation-1", Role: "assistant", Content: "旧回答", Provider: "openai", Model: "demo", Status: "complete", ReplyToMessageID: &u2, ResponseVersion: 1, IsActiveResponse: true},
+			{ID: "user-3", ConversationID: "conversation-1", Role: "user", Content: "后续问题", Status: "complete"},
+		},
+	}
+	chat := NewChat(repository, testGateway(fakeProviderResolver{client: &scriptedNonStreamToolProvider{}}), nil, nil, 4, nil, "", StreamConfig{}, ContextConfig{})
+
+	session, err := chat.PrepareRegeneration(context.Background(), "account-1", "conversation-1", "assistant-2", RegenerateInput{
+		Provider: "openai", Model: "demo", IdempotencyKey: "regenerate-once",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.UserMessage.ID != u2 || !session.IsRegeneration || session.AssistantMessage.ResponseVersion != 2 {
+		t.Fatalf("session = %#v", session)
+	}
+	if session.AssistantMessage.RegeneratedFrom == nil || *session.AssistantMessage.RegeneratedFrom != "assistant-2" {
+		t.Fatalf("regenerated from = %#v", session.AssistantMessage.RegeneratedFrom)
+	}
+	got := session.request.Messages
+	if len(got) != 3 || got[0].Content != "第一问" || got[1].Content != "第一答" || got[2].Content != "原问题" {
+		t.Fatalf("request messages = %#v", got)
+	}
+}
+
 type fakeChatRepository struct {
 	conversation            model.Conversation
 	history                 []model.Message
@@ -229,6 +262,15 @@ func (f *fakeChatRepository) ListByConversationForUser(context.Context, string, 
 	return append([]model.Message(nil), f.history...), nil
 }
 
+func (f *fakeChatRepository) FindMessageByIDForUser(_ context.Context, _, _ string, messageID string) (model.Message, error) {
+	for _, message := range f.history {
+		if message.ID == messageID {
+			return message, nil
+		}
+	}
+	return model.Message{}, domain.ErrNotFound
+}
+
 func (f *fakeChatRepository) SaveConversationSummaryVersion(_ context.Context, _ string, version *model.ConversationSummaryVersion, activate bool) error {
 	version.Version = int64(len(f.summaryVersions) + 1)
 	f.summaryVersions = append(f.summaryVersions, *version)
@@ -242,6 +284,29 @@ func (f *fakeChatRepository) SaveConversationSummaryVersion(_ context.Context, _
 func (f *fakeChatRepository) CreateTurn(_ context.Context, user, assistant *model.Message) error {
 	user.ID = "message-user"
 	assistant.ID = "message-assistant"
+	assistant.ReplyToMessageID = &user.ID
+	assistant.ResponseVersion = 1
+	assistant.IsActiveResponse = true
+	return nil
+}
+
+func (f *fakeChatRepository) CreateRegeneration(_ context.Context, _ string, targetMessageID, replyToMessageID string, assistant *model.Message) error {
+	latest := int64(1)
+	for index := range f.history {
+		message := &f.history[index]
+		if message.Role == "assistant" && message.ReplyToMessageID != nil && *message.ReplyToMessageID == replyToMessageID {
+			message.IsActiveResponse = false
+			if message.ResponseVersion > latest {
+				latest = message.ResponseVersion
+			}
+		}
+	}
+	assistant.ID = "message-regenerated"
+	assistant.ReplyToMessageID = &replyToMessageID
+	assistant.ResponseVersion = latest + 1
+	assistant.IsActiveResponse = true
+	assistant.RegeneratedFrom = &targetMessageID
+	f.history = append(f.history, *assistant)
 	return nil
 }
 
