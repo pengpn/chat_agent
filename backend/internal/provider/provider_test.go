@@ -463,6 +463,19 @@ func TestRegistryCalculatesCostInNanoUSD(t *testing.T) {
 	}
 }
 
+func TestRegistryReturnsConfiguredModelTokenizer(t *testing.T) {
+	registry := NewRegistry([]config.ProviderConfig{{
+		ID: "openai", Type: "openai-compatible", BaseURL: "https://example.com", APIKey: "key",
+		Models: []string{"gpt-4o-mini"}, ModelTokenizers: map[string]string{"gpt-4o-mini": "o200k_base"},
+	}})
+	if got := registry.Tokenizer("openai", "gpt-4o-mini"); got != "o200k_base" {
+		t.Fatalf("tokenizer = %q", got)
+	}
+	if got := registry.Tokenizer("openai", "missing"); got != "heuristic" {
+		t.Fatalf("fallback tokenizer = %q", got)
+	}
+}
+
 func collect(events <-chan StreamEvent) string {
 	var content strings.Builder
 	for event := range events {

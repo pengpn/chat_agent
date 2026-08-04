@@ -42,8 +42,8 @@ func TestGatewayTokenBudgetUsesStrictestConfiguredLimits(t *testing.T) {
 
 func TestHeuristicTokenEstimatorCountsCJKAndToolSchema(t *testing.T) {
 	estimator := HeuristicTokenEstimator{}
-	withoutTool := estimator.EstimateInput(provider.ChatRequest{Messages: []provider.Message{{Role: "user", Content: "这是中文"}}})
-	withTool := estimator.EstimateInput(provider.ChatRequest{
+	withoutTool := estimator.EstimateInput("demo", provider.ChatRequest{Messages: []provider.Message{{Role: "user", Content: "这是中文"}}})
+	withTool := estimator.EstimateInput("demo", provider.ChatRequest{
 		Messages: []provider.Message{{Role: "user", Content: "这是中文"}},
 		Tools: []provider.ToolDefinition{{Function: provider.ToolFunctionDefinition{
 			Name: "lookup", Description: "查询天气",
@@ -55,6 +55,27 @@ func TestHeuristicTokenEstimatorCountsCJKAndToolSchema(t *testing.T) {
 	}
 	if withTool <= withoutTool {
 		t.Fatalf("tool schema was not included: without=%d with=%d", withoutTool, withTool)
+	}
+}
+
+func TestModelTokenEstimatorUsesConfiguredCompatibleTokenizer(t *testing.T) {
+	request := provider.ChatRequest{Model: "gpt-4o-mini", Messages: []provider.Message{{Role: "user", Content: "hello tokenizer"}}}
+	estimator := NewModelTokenEstimator(fakeCatalog{tokenizerName: "o200k_base"})
+	codec, err := estimator.codec("o200k_base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentTokens, err := codec.Count("hello tokenizer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := estimator.EstimateInput("openai", request), int64(3+4+contentTokens); got != want {
+		t.Fatalf("estimate=%d want=%d", got, want)
+	}
+
+	fallback := NewModelTokenEstimator(fakeCatalog{tokenizerName: "heuristic"})
+	if got, want := fallback.EstimateInput("demo", request), (HeuristicTokenEstimator{}).EstimateInput("demo", request); got != want {
+		t.Fatalf("heuristic fallback=%d want=%d", got, want)
 	}
 }
 
@@ -259,8 +280,9 @@ func testRequest(content string) Request {
 }
 
 type fakeCatalog struct {
-	client provider.Provider
-	limits provider.ModelLimits
+	client        provider.Provider
+	limits        provider.ModelLimits
+	tokenizerName string
 }
 
 func (f fakeCatalog) Get(string, string) (provider.Provider, error)                 { return f.client, nil }
@@ -269,6 +291,12 @@ func (fakeCatalog) SupportsThinking(string, string) bool                        
 func (fakeCatalog) CalculateCost(string, string, provider.TokenUsage) (int64, bool) { return 0, false }
 func (f fakeCatalog) Limits(string, string) (provider.ModelLimits, bool) {
 	return f.limits, f.limits.ContextWindow > 0
+}
+func (f fakeCatalog) Tokenizer(string, string) string {
+	if f.tokenizerName != "" {
+		return f.tokenizerName
+	}
+	return "heuristic"
 }
 
 type fakeClient struct {

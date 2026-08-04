@@ -32,7 +32,7 @@ func TestContextManagementSummarizesOldHistoryAndAccountsUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	estimated, err := gateway.EstimateInputTokens(session.request)
+	estimated, err := gateway.EstimateInputTokens("demo", session.request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestContextManagementFallsBackToRecentMessagesWhenSummaryFails(t *testing.T
 		t.Fatalf("calls=%d persisted=%q messages=%#v", client.summaryCalls, repository.summary, session.request.Messages)
 	}
 	budget, _ := gateway.TokenBudget("demo", "demo", 0)
-	estimated, _ := gateway.EstimateInputTokens(session.request)
+	estimated, _ := gateway.EstimateInputTokens("demo", session.request)
 	if estimated > budget.InputTokenLimit {
 		t.Fatalf("fallback tokens=%d limit=%d", estimated, budget.InputTokenLimit)
 	}
@@ -151,11 +151,74 @@ func TestContextManagementTrimsLongChineseAndEnglishHistoryOnTurnBoundary(t *tes
 				t.Fatalf("trimmed history starts with an orphan response: %#v", session.request.Messages)
 			}
 			budget, _ := gateway.TokenBudget("demo", "demo", 0)
-			estimated, _ := gateway.EstimateInputTokens(session.request)
+			estimated, _ := gateway.EstimateInputTokens("demo", session.request)
 			if estimated > budget.InputTokenLimit {
 				t.Fatalf("tokens=%d limit=%d", estimated, budget.InputTokenLimit)
 			}
 		})
+	}
+}
+
+func TestContextManagementUsesIndependentSummaryModelAndTracksQualityVersion(t *testing.T) {
+	repository := &fakeChatRepository{history: contextTestHistory(10, 24)}
+	conversationClient := &contextTestProvider{}
+	summaryClient := &qualitySummaryProvider{score: 92, passed: true}
+	resolver := routingProviderResolver{clients: map[string]provider.Provider{"chat": conversationClient, "summary": summaryClient}}
+	gateway := llmgateway.New(resolver, llmgateway.HeuristicTokenEstimator{}, nil, llmgateway.NewMemoryIdempotencyStore(time.Hour), nil,
+		llmgateway.Config{TokenBudget: 2_000, MaxOutputTokens: 30})
+	chat := NewChat(repository, gateway, nil, nil, 4, nil, "system", StreamConfig{}, ContextConfig{
+		SummaryEnabled: true, SummaryProvider: "summary", SummaryModel: "small",
+		SummaryMaxTokens: 20, KeepRecentMessages: 2, SummaryMaxCalls: 2,
+		QualityEnabled: true, QualityThreshold: 70, QualityMaxTokens: 20,
+	})
+
+	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "继续", Provider: "chat", Model: "large"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaryClient.summaryCalls == 0 || summaryClient.qualityCalls == 0 || repository.summary == "" || len(repository.summaryVersions) == 0 {
+		t.Fatalf("summary=%d quality=%d active=%q versions=%#v", summaryClient.summaryCalls, summaryClient.qualityCalls, repository.summary, repository.summaryVersions)
+	}
+	version := repository.summaryVersions[0]
+	if version.Provider != "summary" || version.Model != "small" || version.Status != "accepted" || !version.QualityPassed || version.QualityScore != 92 || version.PromptVersion != summaryPromptVersion || version.EvaluationPromptVersion != summaryEvaluationPromptVersion {
+		t.Fatalf("version = %#v", version)
+	}
+
+	completed, err := chat.Chat(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparationTokens := int64(summaryClient.summaryCalls*15 + summaryClient.qualityCalls*6)
+	if completed.TotalTokens != preparationTokens+5 {
+		t.Fatalf("total tokens=%d want=%d", completed.TotalTokens, preparationTokens+5)
+	}
+	wantCost := preparationTokens*10 + 5*100
+	if !completed.CostKnown || completed.CostNanoUSD != wantCost {
+		t.Fatalf("cost=%d known=%t want=%d", completed.CostNanoUSD, completed.CostKnown, wantCost)
+	}
+}
+
+func TestContextManagementRejectsLowQualitySummaryAndKeepsVersion(t *testing.T) {
+	repository := &fakeChatRepository{history: contextTestHistory(8, 24)}
+	summaryClient := &qualitySummaryProvider{score: 40, passed: true}
+	resolver := routingProviderResolver{clients: map[string]provider.Provider{"chat": &contextTestProvider{}, "summary": summaryClient}}
+	gateway := llmgateway.New(resolver, llmgateway.HeuristicTokenEstimator{}, nil, llmgateway.NewMemoryIdempotencyStore(time.Hour), nil,
+		llmgateway.Config{TokenBudget: 2_000, MaxOutputTokens: 30})
+	chat := NewChat(repository, gateway, nil, nil, 4, nil, "system", StreamConfig{}, ContextConfig{
+		SummaryEnabled: true, SummaryProvider: "summary", SummaryModel: "small",
+		SummaryMaxTokens: 20, KeepRecentMessages: 2, SummaryMaxCalls: 2,
+		QualityEnabled: true, QualityThreshold: 70, QualityMaxTokens: 20,
+	})
+
+	session, err := chat.Prepare(context.Background(), "user-1", "conversation-1", ChatInput{Content: "继续", Provider: "chat", Model: "large"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.summary != "" || len(repository.summaryVersions) != 1 || repository.summaryVersions[0].Status != "rejected" {
+		t.Fatalf("active=%q versions=%#v", repository.summary, repository.summaryVersions)
+	}
+	if containsSystemSummary(session.request.Messages) {
+		t.Fatalf("rejected summary entered final context: %#v", session.request.Messages)
 	}
 }
 
@@ -218,3 +281,57 @@ func (*contextTestProvider) ChatStream(context.Context, provider.ChatRequest) <-
 	close(events)
 	return events
 }
+
+type qualitySummaryProvider struct {
+	summaryCalls int
+	qualityCalls int
+	score        int
+	passed       bool
+}
+
+func (p *qualitySummaryProvider) Chat(_ context.Context, request provider.ChatRequest) (provider.ChatResponse, error) {
+	for _, message := range request.Messages {
+		switch message.Content {
+		case summarySystemPrompt:
+			p.summaryCalls++
+			return provider.ChatResponse{Content: "独立小模型生成的摘要", Usage: &provider.TokenUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}}, nil
+		case summaryEvaluationSystemPrompt:
+			p.qualityCalls++
+			return provider.ChatResponse{Content: fmt.Sprintf(`{"passed":%t,"score":%d,"issues":[]}`, p.passed, p.score), Usage: &provider.TokenUsage{InputTokens: 4, OutputTokens: 2, TotalTokens: 6}}, nil
+		}
+	}
+	return provider.ChatResponse{}, errors.New("unexpected summary model request")
+}
+
+func (*qualitySummaryProvider) ChatStream(context.Context, provider.ChatRequest) <-chan provider.StreamEvent {
+	events := make(chan provider.StreamEvent)
+	close(events)
+	return events
+}
+
+type routingProviderResolver struct {
+	clients map[string]provider.Provider
+}
+
+func (r routingProviderResolver) Get(providerID, _ string) (provider.Provider, error) {
+	client := r.clients[providerID]
+	if client == nil {
+		return nil, fmt.Errorf("unknown provider %q", providerID)
+	}
+	return client, nil
+}
+func (routingProviderResolver) SupportsTools(string) bool            { return false }
+func (routingProviderResolver) SupportsThinking(string, string) bool { return false }
+func (routingProviderResolver) CalculateCost(providerID, _ string, usage provider.TokenUsage) (int64, bool) {
+	if providerID == "summary" {
+		return usage.TotalTokens * 10, true
+	}
+	return usage.TotalTokens * 100, true
+}
+func (routingProviderResolver) Limits(providerID, _ string) (provider.ModelLimits, bool) {
+	if providerID == "summary" {
+		return provider.ModelLimits{ContextWindow: 2_000, MaxOutputTokens: 30}, true
+	}
+	return provider.ModelLimits{ContextWindow: 220, MaxOutputTokens: 30}, true
+}
+func (routingProviderResolver) Tokenizer(string, string) string { return "heuristic" }

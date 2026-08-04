@@ -38,9 +38,14 @@ type StreamConfig struct {
 
 type ContextConfig struct {
 	SummaryEnabled     bool
+	SummaryProvider    string
+	SummaryModel       string
 	SummaryMaxTokens   int64
 	KeepRecentMessages int
 	SummaryMaxCalls    int
+	QualityEnabled     bool
+	QualityThreshold   int
+	QualityMaxTokens   int64
 }
 
 type ChatInput struct {
@@ -62,6 +67,9 @@ type ChatSession struct {
 	request                  provider.ChatRequest
 	preparationUsage         provider.TokenUsage
 	preparationUsageReported bool
+	preparationCostNanoUSD   int64
+	preparationCostKnown     bool
+	preparationCostTracked   bool
 }
 
 func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, outputFormats *outputformat.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig, contextConfig ContextConfig) *ChatService {
@@ -76,6 +84,12 @@ func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, t
 	}
 	if contextConfig.SummaryMaxCalls <= 0 {
 		contextConfig.SummaryMaxCalls = 2
+	}
+	if contextConfig.QualityThreshold <= 0 {
+		contextConfig.QualityThreshold = 70
+	}
+	if contextConfig.QualityMaxTokens <= 0 {
+		contextConfig.QualityMaxTokens = 256
 	}
 	return &ChatService{repository: repository, gateway: gateway, tools: tools, outputFormats: outputFormats, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream, context: contextConfig}
 }
@@ -161,7 +175,8 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 			usageData.OutputTokens = contextResult.usage.OutputTokens
 			usageData.TotalTokens = contextResult.usage.TotalTokens
 			usageData.UsageReported = true
-			usageData.CostNanoUSD, usageData.CostKnown = s.gateway.CalculateCost(input.Provider, input.Model, contextResult.usage)
+			usageData.CostNanoUSD = contextResult.costNanoUSD
+			usageData.CostKnown = contextResult.costKnown
 		}
 		finishReason := "context_preparation_failed"
 		if errors.Is(contextErr, llmgateway.ErrTokenBudgetExceeded) {
@@ -174,6 +189,9 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	request = contextResult.request
 	session.preparationUsage = contextResult.usage
 	session.preparationUsageReported = contextResult.usageReported
+	session.preparationCostNanoUSD = contextResult.costNanoUSD
+	session.preparationCostKnown = contextResult.costKnown
+	session.preparationCostTracked = contextResult.costTracked
 	session.request = request
 	return session, nil
 }
@@ -184,6 +202,8 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	var think strings.Builder
 	usage := session.preparationUsage
 	usageReported := session.preparationUsageReported
+	var conversationUsage provider.TokenUsage
+	conversationUsageReported := false
 	status := "complete"
 	finishReason := ""
 	var structuredOutput json.RawMessage
@@ -210,7 +230,9 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		think.WriteString(turn.think)
 		if turn.usageReported {
 			usage.Add(turn.usage)
+			conversationUsage.Add(turn.usage)
 			usageReported = true
+			conversationUsageReported = true
 		}
 		finishReason = turn.finishReason
 		if len(turn.structuredOutput) > 0 {
@@ -272,9 +294,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		TotalTokens:   usage.TotalTokens,
 		UsageReported: usageReported,
 	}
-	if usageReported {
-		usageData.CostNanoUSD, usageData.CostKnown = s.gateway.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
-	}
+	s.applyConversationCost(session, &usageData, conversationUsage, conversationUsageReported)
 	completed, err := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
 		Content: answer.String(), Think: think.String(), StructuredOutput: model.JSONDocument(structuredOutput), Status: status, FinishReason: finishReason, Usage: usageData,
 	})
@@ -399,6 +419,8 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 	var answer, think strings.Builder
 	usage := session.preparationUsage
 	usageReported := session.preparationUsageReported
+	var conversationUsage provider.TokenUsage
+	conversationUsageReported := false
 	status := "complete"
 	var chatErr error
 	var structuredOutput json.RawMessage
@@ -417,7 +439,9 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		})
 		if result.Usage != nil {
 			usage.Add(*result.Usage)
+			conversationUsage.Add(*result.Usage)
 			usageReported = true
+			conversationUsageReported = true
 		}
 		if err != nil {
 			status = "error"
@@ -457,9 +481,7 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		TotalTokens:   usage.TotalTokens,
 		UsageReported: usageReported,
 	}
-	if usageReported {
-		usageData.CostNanoUSD, usageData.CostKnown = s.gateway.CalculateCost(session.AssistantMessage.Provider, session.AssistantMessage.Model, usage)
-	}
+	s.applyConversationCost(session, &usageData, conversationUsage, conversationUsageReported)
 	finishReason := "stop"
 	if status != "complete" {
 		finishReason = status
@@ -476,6 +498,25 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		return completed, chatErr
 	}
 	return completed, nil
+}
+
+func (s *ChatService) applyConversationCost(session *ChatSession, usageData *model.MessageUsage, conversationUsage provider.TokenUsage, conversationUsageReported bool) {
+	usageData.CostNanoUSD = session.preparationCostNanoUSD
+	if !conversationUsageReported {
+		// A normal answer call was attempted but did not report usage, so the
+		// complete business-message cost cannot be declared known.
+		usageData.CostKnown = false
+		return
+	}
+	conversationCost, conversationCostKnown := s.gateway.CalculateCost(
+		session.AssistantMessage.Provider, session.AssistantMessage.Model, conversationUsage,
+	)
+	usageData.CostNanoUSD += conversationCost
+	if session.preparationCostTracked {
+		usageData.CostKnown = session.preparationCostKnown && conversationCostKnown
+	} else {
+		usageData.CostKnown = conversationCostKnown
+	}
 }
 
 // finalize is the only deliberately detached operation in the stream

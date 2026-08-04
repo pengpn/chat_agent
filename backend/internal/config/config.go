@@ -19,6 +19,7 @@ type ProviderConfig struct {
 	StreamIncludeUsage bool                    `json:"-"`
 	ModelPricing       map[string]ModelPricing `json:"-"`
 	ModelLimits        map[string]ModelLimits  `json:"-"`
+	ModelTokenizers    map[string]string       `json:"-"`
 	ConnectTimeout     time.Duration           `json:"-"`
 }
 
@@ -67,9 +68,14 @@ type Config struct {
 	LLMSyncMaxRetries         int
 	LLMRetryBackoff           time.Duration
 	ContextSummaryEnabled     bool
+	ContextSummaryProvider    string
+	ContextSummaryModel       string
 	ContextSummaryMaxTokens   int64
 	ContextKeepRecentMessages int
 	ContextSummaryMaxCalls    int
+	ContextQualityEnabled     bool
+	ContextQualityThreshold   int
+	ContextQualityMaxTokens   int64
 	SystemPrompt              string
 	Providers                 []ProviderConfig
 }
@@ -198,6 +204,21 @@ func Load() (Config, error) {
 	if contextSummaryMaxCalls > 5 {
 		return Config{}, fmt.Errorf("CONTEXT_SUMMARY_MAX_CALLS must not exceed 5")
 	}
+	contextQualityEnabled, err := boolEnv("CONTEXT_SUMMARY_QUALITY_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	contextQualityThreshold, err := positiveIntEnv("CONTEXT_SUMMARY_QUALITY_THRESHOLD", 70)
+	if err != nil {
+		return Config{}, err
+	}
+	if contextQualityThreshold > 100 {
+		return Config{}, fmt.Errorf("CONTEXT_SUMMARY_QUALITY_THRESHOLD must not exceed 100")
+	}
+	contextQualityMaxTokens, err := positiveInt64Env("CONTEXT_SUMMARY_QUALITY_MAX_TOKENS", 256)
+	if err != nil {
+		return Config{}, err
+	}
 
 	providers, err := configuredProviders(streamConnectTimeout, llmTokenBudget, llmMaxOutputTokens)
 	if err != nil {
@@ -234,9 +255,14 @@ func Load() (Config, error) {
 		LLMSyncMaxRetries:         llmSyncMaxRetries,
 		LLMRetryBackoff:           llmRetryBackoff,
 		ContextSummaryEnabled:     contextSummaryEnabled,
+		ContextSummaryProvider:    strings.TrimSpace(os.Getenv("CONTEXT_SUMMARY_PROVIDER")),
+		ContextSummaryModel:       strings.TrimSpace(os.Getenv("CONTEXT_SUMMARY_MODEL")),
 		ContextSummaryMaxTokens:   contextSummaryMaxTokens,
 		ContextKeepRecentMessages: contextKeepRecentMessages,
 		ContextSummaryMaxCalls:    contextSummaryMaxCalls,
+		ContextQualityEnabled:     contextQualityEnabled,
+		ContextQualityThreshold:   contextQualityThreshold,
+		ContextQualityMaxTokens:   contextQualityMaxTokens,
 		SystemPrompt:              env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
 		Providers:                 providers,
 	}
@@ -251,7 +277,33 @@ func Load() (Config, error) {
 		}
 	}
 	cfg.Providers = configured
+	if err := validateSummaryTarget(cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func validateSummaryTarget(cfg Config) error {
+	providerID := strings.TrimSpace(cfg.ContextSummaryProvider)
+	modelName := strings.TrimSpace(cfg.ContextSummaryModel)
+	if (providerID == "") != (modelName == "") {
+		return fmt.Errorf("CONTEXT_SUMMARY_PROVIDER and CONTEXT_SUMMARY_MODEL must be configured together")
+	}
+	if providerID == "" || !cfg.ContextSummaryEnabled {
+		return nil
+	}
+	for _, candidate := range cfg.Providers {
+		if candidate.ID != providerID {
+			continue
+		}
+		for _, model := range candidate.Models {
+			if model == modelName {
+				return nil
+			}
+		}
+		return fmt.Errorf("CONTEXT_SUMMARY_MODEL %q is not enabled for provider %q", modelName, providerID)
+	}
+	return fmt.Errorf("CONTEXT_SUMMARY_PROVIDER %q is not configured with an API key", providerID)
 }
 
 func configuredProviders(connectTimeout time.Duration, defaultContextWindow, defaultMaxOutputTokens int64) ([]ProviderConfig, error) {
@@ -282,6 +334,19 @@ func configuredProviders(connectTimeout time.Duration, defaultContextWindow, def
 		if err != nil {
 			return nil, fmt.Errorf("parse %s_MODEL_LIMITS: %w", definition.prefix, err)
 		}
+		tokenizerDefaults := make(map[string]string, len(models))
+		for _, model := range models {
+			tokenizerDefaults[model] = "heuristic"
+			if definition.id == "openai" {
+				tokenizerDefaults[model] = defaultOpenAITokenizer(model)
+			} else if definition.id == "deepseek" && strings.HasPrefix(model, "deepseek-v4-") {
+				tokenizerDefaults[model] = "deepseek_v4"
+			}
+		}
+		tokenizers, err := parseModelTokenizers(env(definition.prefix+"_MODEL_TOKENIZERS", ""), models, tokenizerDefaults)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s_MODEL_TOKENIZERS: %w", definition.prefix, err)
+		}
 		result = append(result, ProviderConfig{
 			ID:                 definition.id,
 			Label:              definition.label,
@@ -292,10 +357,63 @@ func configuredProviders(connectTimeout time.Duration, defaultContextWindow, def
 			StreamIncludeUsage: includeUsage,
 			ModelPricing:       pricing,
 			ModelLimits:        limits,
+			ModelTokenizers:    tokenizers,
 			ConnectTimeout:     connectTimeout,
 		})
 	}
 	return result, nil
+}
+
+// parseModelTokenizers accepts comma-separated model:tokenizer entries. The
+// supported local tokenizer names include tiktoken encodings and the bundled
+// DeepSeek V4 official tokenizer; heuristic keeps the conservative fallback.
+func parseModelTokenizers(value string, models []string, defaults map[string]string) (map[string]string, error) {
+	allowed := map[string]bool{"heuristic": true, "o200k_base": true, "cl100k_base": true, "p50k_base": true, "r50k_base": true, "deepseek_v4": true}
+	result := make(map[string]string, len(models))
+	for _, model := range models {
+		tokenizerName := defaults[model]
+		if tokenizerName == "" {
+			tokenizerName = "heuristic"
+		}
+		if !allowed[tokenizerName] {
+			return nil, fmt.Errorf("model %q uses unsupported default tokenizer %q", model, tokenizerName)
+		}
+		result[model] = tokenizerName
+	}
+	if strings.TrimSpace(value) == "" {
+		return result, nil
+	}
+	for _, item := range splitCSV(value) {
+		model, tokenizerName, ok := strings.Cut(item, ":")
+		model = strings.TrimSpace(model)
+		tokenizerName = strings.TrimSpace(tokenizerName)
+		if !ok || model == "" || tokenizerName == "" {
+			return nil, fmt.Errorf("%q must be model:tokenizer", item)
+		}
+		if _, enabled := result[model]; !enabled {
+			return nil, fmt.Errorf("model %q is not present in the corresponding MODELS setting", model)
+		}
+		if !allowed[tokenizerName] {
+			return nil, fmt.Errorf("model %q uses unsupported tokenizer %q", model, tokenizerName)
+		}
+		result[model] = tokenizerName
+	}
+	return result, nil
+}
+
+func defaultOpenAITokenizer(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, prefix := range []string{"gpt-5", "gpt-4.5", "gpt-4.1", "gpt-4o", "o1", "o3", "o4"} {
+		if strings.HasPrefix(model, prefix) {
+			return "o200k_base"
+		}
+	}
+	for _, prefix := range []string{"gpt-4", "gpt-3.5"} {
+		if strings.HasPrefix(model, prefix) {
+			return "cl100k_base"
+		}
+	}
+	return "heuristic"
 }
 
 // parseModelLimits accepts comma-separated model:context_window:max_output

@@ -214,6 +214,7 @@ type fakeChatRepository struct {
 	history                 []model.Message
 	summary                 string
 	summaryThroughMessageID string
+	summaryVersions         []model.ConversationSummaryVersion
 	lastCompletion          model.MessageCompletion
 }
 
@@ -228,9 +229,13 @@ func (f *fakeChatRepository) ListByConversationForUser(context.Context, string, 
 	return append([]model.Message(nil), f.history...), nil
 }
 
-func (f *fakeChatRepository) UpdateConversationSummary(_ context.Context, _, _, summary, throughMessageID string) error {
-	f.summary = summary
-	f.summaryThroughMessageID = throughMessageID
+func (f *fakeChatRepository) SaveConversationSummaryVersion(_ context.Context, _ string, version *model.ConversationSummaryVersion, activate bool) error {
+	version.Version = int64(len(f.summaryVersions) + 1)
+	f.summaryVersions = append(f.summaryVersions, *version)
+	if activate {
+		f.summary = version.Summary
+		f.summaryThroughMessageID = version.ThroughMessageID
+	}
 	return nil
 }
 
@@ -275,6 +280,7 @@ func (f fakeProviderResolver) Limits(string, string) (provider.ModelLimits, bool
 	}
 	return provider.ModelLimits{ContextWindow: 1_000_000, MaxOutputTokens: 4096}, true
 }
+func (fakeProviderResolver) Tokenizer(string, string) string { return "heuristic" }
 
 func testGateway(catalog llmgateway.Catalog) llmgateway.Gateway {
 	return llmgateway.New(catalog, nil, nil, llmgateway.NewMemoryIdempotencyStore(time.Hour), nil, llmgateway.Config{
@@ -394,3 +400,4 @@ func (thinkingProviderResolver) CalculateCost(string, string, provider.TokenUsag
 func (thinkingProviderResolver) Limits(string, string) (provider.ModelLimits, bool) {
 	return provider.ModelLimits{ContextWindow: 1_000_000, MaxOutputTokens: 4096}, true
 }
+func (thinkingProviderResolver) Tokenizer(string, string) string { return "heuristic" }

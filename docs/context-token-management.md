@@ -430,7 +430,124 @@ Earlier conversation summary:
 
 这样既不会丢失原始系统规则，也能让 Anthropic 收到早期历史摘要。
 
-## 13. 可观测日志
+## 13. 本轮进阶迭代
+
+### 13.1 模型级兼容 Tokenizer
+
+原来的 `HeuristicTokenEstimator` 只能根据字符类型估算。现在新增 `ModelTokenEstimator`，通过 Provider/模型配置选择不同策略：
+
+```dotenv
+OPENAI_MODEL_TOKENIZERS=gpt-4o-mini:o200k_base
+DEEPSEEK_MODEL_TOKENIZERS=deepseek-v4-flash:deepseek_v4
+```
+
+支持的值：
+
+| 配置值 | 行为 |
+| --- | --- |
+| `o200k_base` | 使用本地 tiktoken 兼容 BPE 词表 |
+| `cl100k_base` | 使用本地 tiktoken 兼容 BPE 词表 |
+| `p50k_base` | 使用本地 tiktoken 兼容 BPE 词表 |
+| `r50k_base` | 使用本地 tiktoken 兼容 BPE 词表 |
+| `deepseek_v4` | 使用 DeepSeek V4 官方 ByteLevel BPE 词表和消息编码格式 |
+| `heuristic` | 使用中日韩字符/拉丁字符保守估算 |
+
+`ModelTokenEstimator` 会缓存已经加载的 Codec，避免每次请求重新初始化词表。消息内容、工具调用参数、工具 JSON Schema 和结构化输出约束都会使用模型对应 Codec 计算。
+
+DeepSeek V4 是一个例外：它不是 tiktoken 兼容词表。项目固定引入 DeepSeek 官方 `tokenizer.json`，并按照官方 `encoding_dsv4` 规则重新构造完整输入，包括：
+
+- BOS、User、Assistant、EOS 与 think 特殊 Token；
+- 普通模式和思考模式的历史消息处理；
+- 工具定义模板、DSML 工具调用和 `tool_result`；
+- ByteLevel 预分词与官方 BPE 合并规则。
+
+官方 tokenizer 文件通过 `go:embed` 编译进后端，服务启动和请求过程中不访问 Hugging Face。资产来源、下载日期和 SHA-256 记录在 `backend/internal/llmgateway/tokenizer_assets/README.md`。测试使用 Hugging Face 官方 tokenizers 生成的黄金向量，对照普通文本、多语言文本、多轮思考和工具调用场景的 prompt 哈希与 Token 数。
+
+OpenAI 模型未显式配置时会按官方 tiktoken 的模型映射选择默认值：GPT-5、GPT-4.5、GPT-4.1、GPT-4o、o1/o3/o4 使用 `o200k_base`，其他 GPT-4 和 GPT-3.5 使用 `cl100k_base`，无法识别的名称回退 `heuristic`。环境变量始终可以覆盖该推断。
+
+这里刻意没有把所有“OpenAI-compatible API”都视为使用 OpenAI tokenizer。API 协议兼容不代表词表兼容。只有确认使用相同或兼容词表的模型才配置对应编码，否则必须保持 `heuristic`。如果官方资产加载、消息编码或单段分词失败，也会自动回退到保守估算，不让 Token 计数故障阻断对话。
+
+供应商响应中的真实 `usage` 仍是计费依据；本地 tokenizer 只服务于请求前预算、裁剪和限流。
+
+### 13.2 独立摘要模型
+
+摘要模型默认复用当前会话选择的 Provider 和模型。配置下面两个变量后，会将摘要生成和质量评估路由到独立模型：
+
+```dotenv
+CONTEXT_SUMMARY_PROVIDER=openai
+CONTEXT_SUMMARY_MODEL=gpt-4o-mini
+```
+
+两个变量必须同时配置，并且目标 Provider 必须存在 API Key、目标模型必须出现在对应的 `*_MODELS` 中，否则服务启动时直接报告配置错误。
+
+独立 Provider 会收到待摘要的历史原文，因此它不仅是成本配置，也属于数据路由策略。生产环境应在启用前确认数据驻留、隐私要求和供应商协议；不允许跨 Provider 时，可以选择同一 Provider 的小模型，或保持两个配置为空。
+
+独立摘要模型解决两个问题：
+
+1. 普通对话可能使用昂贵的大模型，但历史压缩通常可以交给便宜的小模型；
+2. 摘要请求可以使用独立的窗口、输出限制、tokenizer 和价格配置。
+
+摘要生成和质量评估仍统一经过 `LLMGateway`，不会绕过限流、重试、结构化输出校验和观测。`ChatSession` 会分别累计准备阶段成本与最终回答成本：
+
+```text
+业务消息总成本
+= 摘要模型生成成本
++ 摘要模型质量评估成本
++ 对话模型最终回答成本
+```
+
+成本不能先合并 Token 再按对话模型单价计算，因为不同模型单价不同。代码会先按每次调用的 Provider/模型计算成本，再合并纳美元整数。
+
+### 13.3 摘要质量评估
+
+摘要生成后不会立即写入活跃上下文。开启下面配置后，服务会让摘要模型返回结构化评估：
+
+```dotenv
+CONTEXT_SUMMARY_QUALITY_ENABLED=true
+CONTEXT_SUMMARY_QUALITY_THRESHOLD=70
+CONTEXT_SUMMARY_QUALITY_MAX_TOKENS=256
+```
+
+评估结果必须符合 JSON Schema：
+
+```json
+{
+  "passed": true,
+  "score": 92,
+  "issues": []
+}
+```
+
+候选摘要只有同时满足以下条件才会激活：
+
+```text
+passed == true
+score >= CONTEXT_SUMMARY_QUALITY_THRESHOLD
+```
+
+低质量摘要不会污染后续对话。它会保存为 `rejected` 版本，当前请求退化为仅保留最近历史。评估请求失败或结果无效时保存为 `evaluation_failed`，同样不会激活候选摘要。
+
+### 13.4 摘要版本追踪
+
+新增 `conversation_summary_versions` 表，每次成功生成的候选摘要都会形成不可变版本。主要字段包括：
+
+| 字段 | 含义 |
+| --- | --- |
+| `version` | 会话内递增版本号 |
+| `summary` | 候选摘要正文 |
+| `through_message_id` | 摘要覆盖到的消息断点 |
+| `provider` / `model` | 实际摘要模型 |
+| `prompt_version` | 摘要提示词版本，例如 `summary-v1` |
+| `evaluation_prompt_version` | 质量评估提示词版本 |
+| `status` | `accepted`、`rejected` 或 `evaluation_failed` |
+| `quality_score` / `quality_issues` | 质量分数和问题列表 |
+| Token/成本字段 | 摘要生成与评估的真实用量和成本 |
+
+保存版本时会锁定所属会话行，在事务中计算下一个版本号、写入版本，并在版本通过时更新 `conversations` 的活跃摘要和断点。这样“版本写入”和“切换活跃摘要”保持原子性，也降低并发摘要覆盖版本号的风险。
+
+`Conversation.Summary` 仍然是读取性能更好的活跃快照；`ConversationSummaryVersion` 是审计、排查质量问题和未来回滚摘要的历史记录。
+
+## 14. 可观测日志
 
 上下文准备完成后记录 `conversation context prepared` 日志，包含：
 
@@ -446,11 +563,15 @@ Earlier conversation summary:
 | `summarized_messages` | 本次进入滚动摘要的消息数 |
 | `kept_history_messages` | 最终保留的历史消息数 |
 | `summary_calls` | 本次摘要模型调用次数 |
+| `tokenizer` | 当前对话模型使用的 tokenizer |
+| `summary_provider` / `summary_model` | 实际摘要目标 |
+| `summary_quality_score` | 最近一次摘要评分 |
+| `summary_quality_status` | `accepted`、`rejected`、`evaluation_failed` 或 `not_evaluated` |
 | `summary_included` | 最终请求是否带有摘要 |
 
 这些字段可以帮助定位模型窗口过小、system prompt 过长、工具 Schema 过大、摘要频繁或者历史裁剪过多等问题。
 
-## 14. 测试覆盖
+## 15. 测试覆盖
 
 测试主要位于：
 
@@ -471,6 +592,11 @@ Earlier conversation summary:
 - 裁剪后的历史不从孤立 assistant 消息开始；
 - Anthropic 合并多条 system 消息；
 - Provider 正确接收最大输出 Token。
+- 模型使用配置的 tiktoken 兼容 Codec，并在未配置时回退；
+- 摘要生成和质量评估使用独立小模型；
+- 摘要模型与对话模型按各自单价累计成本；
+- 通过质量阈值的摘要激活并保存版本；
+- 低质量摘要保存为拒绝版本，但不进入上下文。
 
 运行测试：
 
@@ -479,15 +605,23 @@ cd backend
 go test ./...
 ```
 
-## 15. 当前实现的边界
+## 16. 当前实现的边界
 
 当前版本已经能够安全控制普通对话上下文，但仍有几个适合后续迭代的方向：
 
-1. 根据不同模型接入官方或兼容 tokenizer，提高请求前估算精度；
-2. 为同一会话的并发摘要增加乐观锁，避免并发请求互相覆盖摘要断点；
-3. 为摘要调用配置独立的小模型，降低摘要成本；
-4. 将工具中间消息持久化，支持后续对话恢复完整工具上下文；
-5. 增加摘要质量评估和摘要版本追踪；
-6. 用版本化 Migration 替代生产环境的 GORM AutoMigrate。
+1. 继续为 Kimi、Anthropic、GLM 接入官方离线词表或官方 Token Count API；
+2. 增加摘要版本查询、人工比较和一键回滚能力；
+3. 将工具中间消息持久化，支持后续对话恢复完整工具上下文；
+4. 建立离线摘要评测集，持续校准质量阈值和提示词；
+5. 用版本化 Migration 替代生产环境的 GORM AutoMigrate。
 
 本功能的关键原则是：上下文管理属于业务编排，供应商调用仍统一经过 `LLMGateway`；任何裁剪、摘要和降级都必须在模型请求发出之前完成，并且实际用量不能因为内部摘要调用而漏记。
+
+## 17. 参考资料
+
+- [OpenAI Tokenizer](https://platform.openai.com/tokenizer/)
+- [OpenAI tiktoken](https://github.com/openai/tiktoken)
+- [tiktoken-go/tokenizer](https://github.com/tiktoken-go/tokenizer)
+- [Anthropic Token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting)
+- [DeepSeek Token 用量计算](https://api-docs.deepseek.com/zh-cn/quick_start/token_usage)
+- [DeepSeek V4 官方模型与 Tokenizer](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)

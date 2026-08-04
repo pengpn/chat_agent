@@ -30,7 +30,7 @@ func NewServerWithRateLimiter(repositories *repository.Repositories, jwtManager 
 	streams := streamcache.New(cfg.StreamCacheTTL, cfg.StreamCacheMaxEvents)
 	gateway := llmgateway.New(
 		providers,
-		llmgateway.HeuristicTokenEstimator{},
+		llmgateway.NewModelTokenEstimator(providers),
 		limiter,
 		llmgateway.NewMemoryIdempotencyStore(cfg.LLMIdempotencyTTL),
 		llmgateway.ZapObservation{},
@@ -50,8 +50,10 @@ func NewServerWithRateLimiter(repositories *repository.Repositories, jwtManager 
 				TTFTTimeout:  cfg.StreamTTFTTimeout,
 				TotalTimeout: cfg.StreamTotalTimeout,
 			}, service.ContextConfig{
-				SummaryEnabled: cfg.ContextSummaryEnabled, SummaryMaxTokens: cfg.ContextSummaryMaxTokens,
-				KeepRecentMessages: cfg.ContextKeepRecentMessages, SummaryMaxCalls: cfg.ContextSummaryMaxCalls,
+				SummaryEnabled: cfg.ContextSummaryEnabled, SummaryProvider: cfg.ContextSummaryProvider, SummaryModel: cfg.ContextSummaryModel,
+				SummaryMaxTokens: cfg.ContextSummaryMaxTokens, KeepRecentMessages: cfg.ContextKeepRecentMessages,
+				SummaryMaxCalls: cfg.ContextSummaryMaxCalls, QualityEnabled: cfg.ContextQualityEnabled,
+				QualityThreshold: cfg.ContextQualityThreshold, QualityMaxTokens: cfg.ContextQualityMaxTokens,
 			}),
 			service.NewCatalog(providers),
 			streams,

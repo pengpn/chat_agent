@@ -24,7 +24,7 @@ type ChatRepository interface {
 	ListByConversationForUser(ctx context.Context, userID, conversationID string) ([]model.Message, error)
 	CreateTurn(ctx context.Context, userMessage, assistantMessage *model.Message) error
 	Finalize(ctx context.Context, id string, completion model.MessageCompletion) (model.Message, error)
-	UpdateConversationSummary(ctx context.Context, userID, conversationID, summary, throughMessageID string) error
+	SaveConversationSummaryVersion(ctx context.Context, userID string, version *model.ConversationSummaryVersion, activate bool) error
 }
 
 func New(db *gorm.DB) *Repositories {
@@ -69,8 +69,8 @@ func (r *Repositories) Finalize(ctx context.Context, id string, completion model
 	return r.Messages.Finalize(ctx, id, completion)
 }
 
-func (r *Repositories) UpdateConversationSummary(ctx context.Context, userID, conversationID, summary, throughMessageID string) error {
-	return r.Conversations.UpdateSummary(ctx, userID, conversationID, summary, throughMessageID)
+func (r *Repositories) SaveConversationSummaryVersion(ctx context.Context, userID string, version *model.ConversationSummaryVersion, activate bool) error {
+	return r.Conversations.SaveSummaryVersion(ctx, userID, version, activate)
 }
 
 func Migrate(ctx context.Context, db *gorm.DB) error {
@@ -81,6 +81,7 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		&model.User{},
 		&model.Conversation{},
 		&model.Message{},
+		&model.ConversationSummaryVersion{},
 	); err != nil {
 		return err
 	}

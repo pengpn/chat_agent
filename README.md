@@ -128,18 +128,26 @@ OPENAI_MODELS=gpt-4o-mini
 OPENAI_MODEL_LIMITS=gpt-4o-mini:32768:4096
 ```
 
-实际预算取模型配置与全局 `LLM_TOKEN_BUDGET` / `LLM_MAX_OUTPUT_TOKENS` 中更严格的值。调用前会计算 system prompt、历史消息、当前问题、工具 JSON Schema、结构化输出约束及输出预留；当前实现使用跨 Provider 的保守估算器，供应商返回的 usage 仍是最终计费和统计依据。若仅 system、工具和当前问题就已超限，请求返回 `422`，不会调用供应商。
+实际预算取模型配置与全局 `LLM_TOKEN_BUDGET` / `LLM_MAX_OUTPUT_TOKENS` 中更严格的值。调用前会计算 system prompt、历史消息、当前问题、工具 JSON Schema、结构化输出约束及输出预留。每个模型通过 `*_MODEL_TOKENIZERS` 选择 `o200k_base`、`cl100k_base`、`p50k_base`、`r50k_base` 或 `heuristic`；tiktoken 兼容模型使用本地 BPE 词表，其他模型安全回退到保守估算。供应商返回的 usage 仍是最终计费和统计依据。若仅 system、工具和当前问题就已超限，请求返回 `422`，不会调用供应商。
 
-历史超限时，服务优先保留 system prompt、当前问题和最近的完整对话轮次，并用当前会话所选模型压缩较早历史。滚动摘要及其消息断点持久化在 `conversations` 表，后续请求只读取断点之后的消息；摘要调用同样经过 `LLMGateway`，其实际 Token 与成本累计到本轮 assistant 消息。摘要失败时会记录警告并退化为按 Token 保留最近历史，不影响当前回答。
+历史超限时，服务优先保留 system prompt、当前问题和最近的完整对话轮次。默认复用当前会话模型压缩较早历史，也可以通过 `CONTEXT_SUMMARY_PROVIDER` 和 `CONTEXT_SUMMARY_MODEL` 路由到更便宜的小模型。摘要和质量评估均经过 `LLMGateway`，其 Token 和成本按各自模型价格累计，再与最终回答成本合并。
+
+独立摘要 Provider 会接收被压缩的历史原文；生产环境必须根据数据驻留、隐私和供应商协议决定是否允许跨 Provider 路由。
+
+候选摘要会经过结构化质量评估，只有 `passed=true` 且分数达到阈值才会成为活跃摘要；低质量或评估失败的候选只写入 `conversation_summary_versions` 审计表，本轮退化为保留最近历史。每个版本记录摘要/评估提示词版本、Provider、模型、消息断点、质量分数、问题列表、Token 和成本。活跃摘要及断点仍保存在 `conversations` 表，后续请求只读取断点之后的消息。
 
 相关配置：
 
 - `CONTEXT_SUMMARY_ENABLED`：是否允许生成滚动摘要，默认 `true`；
+- `CONTEXT_SUMMARY_PROVIDER` / `CONTEXT_SUMMARY_MODEL`：独立摘要模型；同时留空时复用当前会话模型；
 - `CONTEXT_SUMMARY_MAX_TOKENS`：单次摘要的最大输出预留，默认 `1024`；
 - `CONTEXT_KEEP_RECENT_MESSAGES`：生成摘要时至少不参与摘要的最近消息数，默认 `8`；
-- `CONTEXT_SUMMARY_MAX_CALLS`：一次用户请求最多进行的摘要调用次数，默认 `2`、最大 `5`。
+- `CONTEXT_SUMMARY_MAX_CALLS`：一次用户请求最多进行的摘要调用次数，默认 `2`、最大 `5`；
+- `CONTEXT_SUMMARY_QUALITY_ENABLED`：是否评估候选摘要，默认 `true`；
+- `CONTEXT_SUMMARY_QUALITY_THRESHOLD`：摘要通过分数，默认 `70`；
+- `CONTEXT_SUMMARY_QUALITY_MAX_TOKENS`：质量评估最大输出预留，默认 `256`。
 
-日志事件 `conversation context prepared` 会记录窗口、输出预留、原始/摘要/丢弃/最终 Token 估算，以及摘要调用次数和最终保留的历史消息数。
+日志事件 `conversation context prepared` 会记录 tokenizer、窗口、输出预留、原始/摘要/丢弃/最终 Token 估算、摘要模型、质量状态、摘要调用次数和最终保留的历史消息数。
 
 非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature` 和 `outputFormat`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 

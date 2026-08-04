@@ -8,6 +8,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ConversationRepository defines the conversation persistence operations used
@@ -19,7 +20,7 @@ type ConversationRepository interface {
 	UpdateTitle(ctx context.Context, userID, id, title string) (model.Conversation, error)
 	Delete(ctx context.Context, userID, id string) error
 	Touch(ctx context.Context, id string) error
-	UpdateSummary(ctx context.Context, userID, id, summary, throughMessageID string) error
+	SaveSummaryVersion(ctx context.Context, userID string, version *model.ConversationSummaryVersion, activate bool) error
 }
 
 // GormConversationRepository is the PostgreSQL/GORM implementation of
@@ -82,17 +83,31 @@ func (r *GormConversationRepository) Touch(ctx context.Context, id string) error
 		Update("updated_at", time.Now()).Error
 }
 
-func (r *GormConversationRepository) UpdateSummary(ctx context.Context, userID, id, summary, throughMessageID string) error {
-	result := r.db.WithContext(ctx).Model(&model.Conversation{}).
-		Where("id = ? AND user_id = ?", id, userID).
-		Updates(map[string]any{
-			"summary": summary, "summary_through_message_id": throughMessageID, "summary_updated_at": time.Now(),
-		})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return domain.ErrNotFound
-	}
-	return nil
+func (r *GormConversationRepository) SaveSummaryVersion(ctx context.Context, userID string, version *model.ConversationSummaryVersion, activate bool) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var conversation model.Conversation
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", version.ConversationID, userID).First(&conversation).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return domain.ErrNotFound
+			}
+			return err
+		}
+		var latest int64
+		if err := tx.Model(&model.ConversationSummaryVersion{}).
+			Where("conversation_id = ?", version.ConversationID).
+			Select("COALESCE(MAX(version), 0)").Scan(&latest).Error; err != nil {
+			return err
+		}
+		version.Version = latest + 1
+		if err := tx.Create(version).Error; err != nil {
+			return err
+		}
+		if !activate {
+			return nil
+		}
+		return tx.Model(&model.Conversation{}).Where("id = ?", version.ConversationID).Updates(map[string]any{
+			"summary": version.Summary, "summary_through_message_id": version.ThroughMessageID, "summary_updated_at": time.Now(),
+		}).Error
+	})
 }

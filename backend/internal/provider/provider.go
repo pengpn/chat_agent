@@ -143,6 +143,7 @@ type Resolver interface {
 	SupportsThinking(id, model string) bool
 	CalculateCost(providerID, model string, usage TokenUsage) (int64, bool)
 	Limits(providerID, model string) (ModelLimits, bool)
+	Tokenizer(providerID, model string) string
 }
 
 func (r *Registry) Limits(providerID, model string) (ModelLimits, bool) {
@@ -155,6 +156,17 @@ func (r *Registry) Limits(providerID, model string) (ModelLimits, bool) {
 		return ModelLimits{}, false
 	}
 	return ModelLimits{ContextWindow: limits.ContextWindow, MaxOutputTokens: limits.MaxOutputTokens}, true
+}
+
+func (r *Registry) Tokenizer(providerID, model string) string {
+	cfg, ok := r.configs[providerID]
+	if !ok {
+		return "heuristic"
+	}
+	if tokenizerName := cfg.ModelTokenizers[model]; tokenizerName != "" {
+		return tokenizerName
+	}
+	return "heuristic"
 }
 
 type PublicProvider struct {

@@ -39,6 +39,43 @@ func TestParseModelLimits(t *testing.T) {
 	}
 }
 
+func TestParseModelTokenizers(t *testing.T) {
+	defaults := map[string]string{"model-a": "heuristic", "model-b": "heuristic"}
+	tokenizers, err := parseModelTokenizers("model-a:o200k_base,model-b:deepseek_v4", []string{"model-a", "model-b"}, defaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokenizers["model-a"] != "o200k_base" || tokenizers["model-b"] != "deepseek_v4" {
+		t.Fatalf("tokenizers = %#v", tokenizers)
+	}
+	for _, value := range []string{"model-a:unknown", "disabled:o200k_base", "missing-separator"} {
+		if _, err := parseModelTokenizers(value, []string{"model-a"}, map[string]string{"model-a": "heuristic"}); err == nil {
+			t.Fatalf("parseModelTokenizers(%q) unexpectedly succeeded", value)
+		}
+	}
+	if defaultOpenAITokenizer("gpt-4o-mini") != "o200k_base" || defaultOpenAITokenizer("gpt-4.1-mini") != "o200k_base" || defaultOpenAITokenizer("gpt-4-turbo") != "cl100k_base" || defaultOpenAITokenizer("custom") != "heuristic" {
+		t.Fatal("unexpected OpenAI tokenizer inference")
+	}
+}
+
+func TestValidateSummaryTarget(t *testing.T) {
+	provider := ProviderConfig{ID: "openai", APIKey: "key", Models: []string{"small"}}
+	valid := Config{ContextSummaryEnabled: true, ContextSummaryProvider: "openai", ContextSummaryModel: "small", Providers: []ProviderConfig{provider}}
+	if err := validateSummaryTarget(valid); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.ContextSummaryModel = "missing"
+	if err := validateSummaryTarget(invalid); err == nil {
+		t.Fatal("expected an unavailable summary model to fail")
+	}
+	invalid = valid
+	invalid.ContextSummaryModel = ""
+	if err := validateSummaryTarget(invalid); err == nil {
+		t.Fatal("expected a partial summary target to fail")
+	}
+}
+
 func TestStreamConfigurationParsers(t *testing.T) {
 	t.Setenv("TEST_STREAM_TIMEOUT", "1500ms")
 	if timeout, err := positiveDurationEnv("TEST_STREAM_TIMEOUT", "2m"); err != nil || timeout != 1500*time.Millisecond {
