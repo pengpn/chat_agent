@@ -29,7 +29,8 @@ func (s *Server) Router() http.Handler {
 	protected.POST("/conversations/:conversationID/messages/chat", s.handlers.ChatMessage)
 	protected.POST("/conversations/:conversationID/messages", s.handlers.StreamMessage)
 	protected.POST("/conversations/:conversationID/messages/:messageID/regenerate", s.handlers.RegenerateMessage)
-	protected.PATCH("/conversations/:conversationID/messages/:messageID/activate", s.handlers.ActivateResponse)
+	protected.POST("/conversations/:conversationID/messages/:messageID/edit", s.handlers.EditMessage)
+	protected.PATCH("/conversations/:conversationID/messages/:messageID/activate", s.handlers.ActivateBranch)
 	protected.GET("/messages/:messageID/stream", s.handlers.ResumeMessageStream)
 
 	return engine

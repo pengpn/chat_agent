@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -242,13 +244,98 @@ func TestPrepareRegenerationUsesOriginalUserAndStopsContextBeforeOldAnswer(t *te
 	}
 }
 
+func TestPrepareEditCreatesSiblingBranchAndUsesOnlyAncestors(t *testing.T) {
+	rootUser := "root-user"
+	rootAssistant := "root-assistant"
+	targetUser := "target-user"
+	repository := &fakeChatRepository{
+		conversation: model.Conversation{ID: "conversation-1"},
+		history: []model.Message{
+			{ID: rootUser, ConversationID: "conversation-1", Role: "user", Content: "背景", Status: "complete", IsActiveChild: true},
+			{ID: rootAssistant, ConversationID: "conversation-1", Role: "assistant", Content: "背景回答", Status: "complete", ParentMessageID: &rootUser, ReplyToMessageID: &rootUser, IsActiveChild: true, IsActiveResponse: true},
+			{ID: targetUser, ConversationID: "conversation-1", Role: "user", Content: "原问题", Status: "complete", ParentMessageID: &rootAssistant, IsActiveChild: true},
+		},
+	}
+	chat := NewChat(repository, testGateway(fakeProviderResolver{client: &scriptedNonStreamToolProvider{}}), nil, nil, 4, nil, "", StreamConfig{}, ContextConfig{})
+
+	session, err := chat.PrepareEdit(context.Background(), "account-1", "conversation-1", targetUser, ChatInput{
+		Content: "编辑后的问题", Provider: "openai", Model: "demo", IdempotencyKey: "edit-once",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !session.IsEdit || session.UserMessage.Content != "编辑后的问题" || session.UserMessage.EditedFrom == nil || *session.UserMessage.EditedFrom != targetUser {
+		t.Fatalf("session = %#v", session)
+	}
+	if session.UserMessage.ParentMessageID == nil || *session.UserMessage.ParentMessageID != rootAssistant {
+		t.Fatalf("edited parent = %#v", session.UserMessage.ParentMessageID)
+	}
+	got := session.request.Messages
+	if len(got) != 3 || got[0].Content != "背景" || got[1].Content != "背景回答" || got[2].Content != "编辑后的问题" {
+		t.Fatalf("request messages = %#v", got)
+	}
+	if repository.history[2].Content != "原问题" {
+		t.Fatalf("original message was modified: %#v", repository.history[2])
+	}
+}
+
+func TestConcurrentEditsPreserveBothBranchesAndSelectOne(t *testing.T) {
+	targetID := "root-user"
+	repository := &fakeChatRepository{
+		conversation: model.Conversation{ID: "conversation-1"},
+		history: []model.Message{{
+			ID: targetID, ConversationID: "conversation-1", Role: "user", Content: "原问题", Status: "complete", IsActiveChild: true,
+		}},
+	}
+	chat := NewChat(repository, testGateway(fakeProviderResolver{client: &scriptedNonStreamToolProvider{}}), nil, nil, 4, nil, "", StreamConfig{}, ContextConfig{})
+
+	var wait sync.WaitGroup
+	errorsFound := make(chan error, 2)
+	for index := 1; index <= 2; index++ {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := chat.PrepareEdit(context.Background(), "account-1", "conversation-1", targetID, ChatInput{
+				Content: fmt.Sprintf("编辑版本 %d", index), Provider: "openai", Model: "demo", IdempotencyKey: fmt.Sprintf("edit-%d", index),
+			})
+			errorsFound <- err
+		}()
+	}
+	wait.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	editedCount, activeCount := 0, 0
+	for _, message := range repository.history {
+		if message.Role != "user" || message.EditedFrom == nil {
+			continue
+		}
+		editedCount++
+		if message.IsActiveChild {
+			activeCount++
+		}
+	}
+	if editedCount != 2 || activeCount != 1 || repository.history[0].Content != "原问题" {
+		t.Fatalf("edited=%d active=%d history=%#v", editedCount, activeCount, repository.history)
+	}
+}
+
 type fakeChatRepository struct {
+	mu                      sync.Mutex
 	conversation            model.Conversation
 	history                 []model.Message
 	summary                 string
 	summaryThroughMessageID string
 	summaryVersions         []model.ConversationSummaryVersion
 	lastCompletion          model.MessageCompletion
+	editCount               int
 }
 
 func (f *fakeChatRepository) FindByIDForUser(_ context.Context, _ string, id string) (model.Conversation, error) {
@@ -259,10 +346,14 @@ func (f *fakeChatRepository) FindByIDForUser(_ context.Context, _ string, id str
 }
 
 func (f *fakeChatRepository) ListByConversationForUser(context.Context, string, string) ([]model.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return append([]model.Message(nil), f.history...), nil
 }
 
 func (f *fakeChatRepository) FindMessageByIDForUser(_ context.Context, _, _ string, messageID string) (model.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, message := range f.history {
 		if message.ID == messageID {
 			return message, nil
@@ -283,14 +374,19 @@ func (f *fakeChatRepository) SaveConversationSummaryVersion(_ context.Context, _
 
 func (f *fakeChatRepository) CreateTurn(_ context.Context, user, assistant *model.Message) error {
 	user.ID = "message-user"
+	user.IsActiveChild = true
 	assistant.ID = "message-assistant"
+	assistant.ParentMessageID = &user.ID
 	assistant.ReplyToMessageID = &user.ID
 	assistant.ResponseVersion = 1
 	assistant.IsActiveResponse = true
+	assistant.IsActiveChild = true
 	return nil
 }
 
 func (f *fakeChatRepository) CreateRegeneration(_ context.Context, _ string, targetMessageID, replyToMessageID string, assistant *model.Message) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	latest := int64(1)
 	for index := range f.history {
 		message := &f.history[index]
@@ -302,12 +398,44 @@ func (f *fakeChatRepository) CreateRegeneration(_ context.Context, _ string, tar
 		}
 	}
 	assistant.ID = "message-regenerated"
+	assistant.ParentMessageID = &replyToMessageID
 	assistant.ReplyToMessageID = &replyToMessageID
 	assistant.ResponseVersion = latest + 1
 	assistant.IsActiveResponse = true
+	assistant.IsActiveChild = true
 	assistant.RegeneratedFrom = &targetMessageID
 	f.history = append(f.history, *assistant)
 	return nil
+}
+
+func (f *fakeChatRepository) CreateEditedTurn(_ context.Context, _ string, targetMessageID string, user, assistant *model.Message) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for index := range f.history {
+		message := &f.history[index]
+		if message.Role == "user" && sameMessageParent(message.ParentMessageID, user.ParentMessageID) {
+			message.IsActiveChild = false
+		}
+	}
+	f.editCount++
+	user.ID = fmt.Sprintf("message-edited-user-%d", f.editCount)
+	user.IsActiveChild = true
+	user.EditedFrom = &targetMessageID
+	assistant.ID = fmt.Sprintf("message-edited-assistant-%d", f.editCount)
+	assistant.ParentMessageID = &user.ID
+	assistant.ReplyToMessageID = &user.ID
+	assistant.ResponseVersion = 1
+	assistant.IsActiveResponse = true
+	assistant.IsActiveChild = true
+	f.history = append(f.history, *user, *assistant)
+	return nil
+}
+
+func sameMessageParent(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (f *fakeChatRepository) Finalize(_ context.Context, id string, completion model.MessageCompletion) (model.Message, error) {

@@ -24,6 +24,9 @@ export interface Message {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   think?: string
+  parentMessageId?: string
+  isActiveChild?: boolean
+  editedFromMessageId?: string
   replyToMessageId?: string
   responseVersion?: number
   isActiveResponse?: boolean

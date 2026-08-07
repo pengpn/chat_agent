@@ -144,7 +144,18 @@ export async function streamRegeneratedMessage(
   return streamRequest(`/api/v1/conversations/${conversationID}/messages/${messageID}/regenerate`, payload, handlers, signal, idempotencyKey)
 }
 
-export async function activateResponseVersion(conversationID: string, messageID: string): Promise<Message> {
+export async function streamEditedMessage(
+  conversationID: string,
+  messageID: string,
+  payload: ChatPayload,
+  handlers: StreamHandlers,
+  signal: AbortSignal,
+  idempotencyKey: string
+): Promise<void> {
+  return streamRequest(`/api/v1/conversations/${conversationID}/messages/${messageID}/edit`, payload, handlers, signal, idempotencyKey)
+}
+
+export async function activateBranch(conversationID: string, messageID: string): Promise<Message> {
   return (await request<{ message: Message }>(`/api/v1/conversations/${conversationID}/messages/${messageID}/activate`, { method: 'PATCH' })).message
 }
 

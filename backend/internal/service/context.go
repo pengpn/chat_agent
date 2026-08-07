@@ -93,6 +93,10 @@ func (s *ChatService) prepareContext(ctx context.Context, session *ChatSession, 
 	}
 
 	summary, history := contextHistory(conversation, persisted)
+	if session.ContextIsExplicitPath {
+		summary = ""
+		history = completedHistory(persisted)
+	}
 	fullRequest := withConversationContext(request, summary, history)
 	originalTokens, err := s.gateway.EstimateInputTokens(session.AssistantMessage.Provider, fullRequest)
 	if err != nil {
@@ -219,7 +223,7 @@ func (s *ChatService) saveSummaryVersion(ctx context.Context, session *ChatSessi
 	// Regeneration uses a historical prefix. Persisting its summary as the
 	// conversation's rolling summary could move the global summary checkpoint
 	// backwards and duplicate later context.
-	if session.IsRegeneration {
+	if session.ContextIsExplicitPath {
 		return nil
 	}
 	return s.repository.SaveConversationSummaryVersion(ctx, session.UserID, version, activate)
@@ -228,11 +232,12 @@ func (s *ChatService) saveSummaryVersion(ctx context.Context, session *ChatSessi
 // contextHistory 从会话记录还原「摘要 + 摘要之后的原文历史」。
 // SummaryThroughMessageID 指向摘要已覆盖到的最后一条消息；找不到该锚点时丢弃摘要，回退为全量历史。
 func contextHistory(conversation model.Conversation, persisted []model.Message) (string, []model.Message) {
+	branch := selectedBranch(persisted)
 	start := 0
 	summary := strings.TrimSpace(conversation.Summary)
 	if summary != "" && conversation.SummaryThroughMessageID != nil {
 		found := false
-		for index, message := range persisted {
+		for index, message := range branch {
 			if message.ID == *conversation.SummaryThroughMessageID {
 				start = index + 1
 				found = true
@@ -246,7 +251,66 @@ func contextHistory(conversation model.Conversation, persisted []model.Message) 
 	} else {
 		summary = ""
 	}
-	source := persisted[start:]
+	return summary, completedHistory(branch[start:])
+}
+
+func completedHistory(messages []model.Message) []model.Message {
+	history := make([]model.Message, 0, len(messages))
+	for _, message := range messages {
+		if message.Status == "complete" || message.Status == "stopped" {
+			history = append(history, message)
+		}
+	}
+	return history
+}
+
+// selectedBranch follows the single active child below every parent. Inactive
+// sibling subtrees remain persisted but never enter the model context.
+func selectedBranch(messages []model.Message) []model.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	hasTree := false
+	children := make(map[string][]model.Message)
+	for _, message := range messages {
+		if message.ParentMessageID != nil || message.IsActiveChild {
+			hasTree = true
+		}
+		parentID := ""
+		if message.ParentMessageID != nil {
+			parentID = *message.ParentMessageID
+		}
+		children[parentID] = append(children[parentID], message)
+	}
+	if !hasTree {
+		return legacyActiveHistory(messages)
+	}
+	branch := make([]model.Message, 0, len(messages))
+	parentID := ""
+	visited := make(map[string]struct{})
+	for {
+		var selected *model.Message
+		for index := range children[parentID] {
+			candidate := children[parentID][index]
+			if candidate.IsActiveChild {
+				copy := candidate
+				selected = &copy
+			}
+		}
+		if selected == nil {
+			break
+		}
+		if _, exists := visited[selected.ID]; exists {
+			break
+		}
+		visited[selected.ID] = struct{}{}
+		branch = append(branch, *selected)
+		parentID = selected.ID
+	}
+	return branch
+}
+
+func legacyActiveHistory(source []model.Message) []model.Message {
 	history := make([]model.Message, 0, len(source))
 	activeByReply := make(map[string]model.Message)
 	for _, message := range source {
@@ -268,11 +332,50 @@ func contextHistory(conversation model.Conversation, persisted []model.Message) 
 			}
 			message = active
 		}
-		if message.Status == "complete" || message.Status == "stopped" {
-			history = append(history, message)
-		}
+		history = append(history, message)
 	}
-	return summary, history
+	return history
+}
+
+// ancestryBefore returns the exact root-to-parent path for a message. Legacy
+// linear rows fall back to their persisted prefix during the one-time upgrade.
+func ancestryBefore(messages []model.Message, target model.Message) []model.Message {
+	if target.ParentMessageID == nil {
+		if target.IsActiveChild {
+			return nil
+		}
+		index := messageIndex(messages, target.ID)
+		if index <= 0 {
+			return nil
+		}
+		return append([]model.Message(nil), messages[:index]...)
+	}
+	byID := make(map[string]model.Message, len(messages))
+	for _, message := range messages {
+		byID[message.ID] = message
+	}
+	path := make([]model.Message, 0)
+	parentID := *target.ParentMessageID
+	visited := make(map[string]struct{})
+	for parentID != "" {
+		if _, exists := visited[parentID]; exists {
+			return nil
+		}
+		visited[parentID] = struct{}{}
+		parent, ok := byID[parentID]
+		if !ok {
+			return nil
+		}
+		path = append(path, parent)
+		if parent.ParentMessageID == nil {
+			break
+		}
+		parentID = *parent.ParentMessageID
+	}
+	for left, right := 0, len(path)-1; left < right; left, right = left+1, right-1 {
+		path[left], path[right] = path[right], path[left]
+	}
+	return path
 }
 
 // withConversationContext 组装发给对话模型的消息列表：

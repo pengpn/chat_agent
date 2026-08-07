@@ -28,6 +28,32 @@ func TestContextHistoryExcludesInactiveResponseVersions(t *testing.T) {
 	}
 }
 
+func TestContextHistoryFollowsOnlySelectedConversationBranch(t *testing.T) {
+	rootUser := "root-user"
+	rootAssistant := "root-assistant"
+	oldUser := "old-user"
+	newUser := "new-user"
+	messages := []model.Message{
+		{ID: rootUser, Role: "user", Content: "背景", Status: "complete", IsActiveChild: true},
+		{ID: rootAssistant, Role: "assistant", Content: "背景回答", Status: "complete", ParentMessageID: &rootUser, IsActiveChild: true},
+		{ID: oldUser, Role: "user", Content: "旧问题", Status: "complete", ParentMessageID: &rootAssistant, IsActiveChild: false},
+		{ID: "old-answer", Role: "assistant", Content: "旧分支回答", Status: "complete", ParentMessageID: &oldUser, IsActiveChild: true},
+		{ID: newUser, Role: "user", Content: "新问题", Status: "complete", ParentMessageID: &rootAssistant, IsActiveChild: true},
+		{ID: "new-answer", Role: "assistant", Content: "新分支回答", Status: "complete", ParentMessageID: &newUser, IsActiveChild: true},
+	}
+
+	_, history := contextHistory(model.Conversation{}, messages)
+	want := []string{rootUser, rootAssistant, newUser, "new-answer"}
+	if len(history) != len(want) {
+		t.Fatalf("history = %#v", history)
+	}
+	for index := range want {
+		if history[index].ID != want[index] {
+			t.Fatalf("history[%d] = %q, want %q", index, history[index].ID, want[index])
+		}
+	}
+}
+
 func TestContextManagementSummarizesOldHistoryAndAccountsUsage(t *testing.T) {
 	repository := &fakeChatRepository{history: contextTestHistory(10, 24)}
 	client := &contextTestProvider{}

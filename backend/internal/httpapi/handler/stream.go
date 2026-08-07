@@ -55,6 +55,33 @@ func (h *Handler) RegenerateMessage(c *gin.Context) {
 	h.streamPreparedSession(c, flusher, session)
 }
 
+func (h *Handler) EditMessage(c *gin.Context) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器不支持流式响应")
+		return
+	}
+	var input struct {
+		Content      string   `json:"content"`
+		Provider     string   `json:"provider"`
+		Model        string   `json:"model"`
+		Temperature  *float64 `json:"temperature"`
+		OutputFormat string   `json:"outputFormat"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	session, err := h.chat.PrepareEdit(c.Request.Context(), currentUserID(c), c.Param("conversationID"), c.Param("messageID"), service.ChatInput{
+		Content: input.Content, Provider: input.Provider, Model: input.Model, Temperature: input.Temperature,
+		OutputFormat: input.OutputFormat, IdempotencyKey: c.GetHeader("Idempotency-Key"),
+	})
+	if !h.handlePrepareError(c, err) {
+		return
+	}
+	h.streamPreparedSession(c, flusher, session)
+}
+
 func (h *Handler) streamPreparedSession(c *gin.Context, flusher http.Flusher, session *service.ChatSession) {
 	c.Header("Content-Type", "text/event-stream; charset=utf-8")
 	c.Header("Cache-Control", "no-cache, no-transform")
@@ -64,7 +91,8 @@ func (h *Handler) streamPreparedSession(c *gin.Context, flusher http.Flusher, se
 	messageID := session.AssistantMessage.ID
 	h.streams.Start(messageID, currentUserID(c))
 	h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "metadata", map[string]any{
-		"userMessage": session.UserMessage, "assistantMessage": session.AssistantMessage, "regeneration": session.IsRegeneration,
+		"userMessage": session.UserMessage, "assistantMessage": session.AssistantMessage,
+		"regeneration": session.IsRegeneration, "edit": session.IsEdit,
 	}, false)
 
 	var modelErr error
@@ -236,6 +264,8 @@ func (h *Handler) handlePrepareError(c *gin.Context, err error) bool {
 		response.WriteErrorResp(c, http.StatusNotFound, "回答不存在")
 	case errors.Is(err, service.ErrMessageNotRegenerable):
 		response.WriteErrorResp(c, http.StatusConflict, "当前回答不能重新生成")
+	case errors.Is(err, service.ErrMessageNotEditable):
+		response.WriteErrorResp(c, http.StatusConflict, "当前消息不能编辑")
 	case errors.Is(err, llmgateway.ErrIdempotencyInProgress):
 		response.WriteErrorResp(c, http.StatusConflict, "相同消息正在处理，请等待本次请求完成")
 	case errors.Is(err, llmgateway.ErrIdempotencyCompleted):

@@ -17,7 +17,7 @@ var (
 	ErrOutputFormatNotFound   = errors.New("output format not found")
 	ErrMessageNotFound        = errors.New("message not found")
 	ErrMessageNotRegenerable  = errors.New("message cannot be regenerated")
-	ErrResponseNotSwitchable  = errors.New("response version cannot be switched")
+	ErrMessageNotEditable     = errors.New("message cannot be edited")
 )
 
 // ProviderSelectionError indicates a client selected a provider or model that

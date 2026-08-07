@@ -18,7 +18,8 @@ type MessageRepository interface {
 	Create(ctx context.Context, message *model.Message) error
 	Finalize(ctx context.Context, id string, completion model.MessageCompletion) (model.Message, error)
 	CreateRegeneration(ctx context.Context, userID, targetMessageID, replyToMessageID string, assistant *model.Message) error
-	ActivateResponse(ctx context.Context, userID, conversationID, messageID string) (model.Message, error)
+	CreateEditedTurn(ctx context.Context, userID, targetMessageID string, userMessage, assistantMessage *model.Message) error
+	ActivateBranch(ctx context.Context, userID, conversationID, messageID string) (model.Message, error)
 }
 
 // GormMessageRepository is the PostgreSQL/GORM implementation of
@@ -117,8 +118,12 @@ func (r *GormMessageRepository) CreateRegeneration(ctx context.Context, userID, 
 		if err != nil {
 			return err
 		}
-		if target.ReplyToMessageID == nil {
+		if err := activateMessagePath(tx, target); err != nil {
+			return err
+		}
+		if target.ParentMessageID == nil || target.ReplyToMessageID == nil {
 			if err := tx.Model(&model.Message{}).Where("id = ?", target.ID).Updates(map[string]any{
+				"parent_message_id":   replyToMessageID,
 				"reply_to_message_id": replyToMessageID,
 				"response_version":    1,
 			}).Error; err != nil {
@@ -136,13 +141,15 @@ func (r *GormMessageRepository) CreateRegeneration(ctx context.Context, userID, 
 		}
 		if err := tx.Model(&model.Message{}).
 			Where("conversation_id = ? AND role = 'assistant' AND reply_to_message_id = ?", target.ConversationID, replyToMessageID).
-			Update("is_active_response", false).Error; err != nil {
+			Updates(map[string]any{"is_active_response": false, "is_active_child": false}).Error; err != nil {
 			return err
 		}
 		assistant.ConversationID = target.ConversationID
+		assistant.ParentMessageID = &replyToMessageID
 		assistant.ReplyToMessageID = &replyToMessageID
 		assistant.ResponseVersion = latest + 1
 		assistant.IsActiveResponse = true
+		assistant.IsActiveChild = true
 		assistant.RegeneratedFrom = &targetMessageID
 		if err := tx.Create(assistant).Error; err != nil {
 			return err
@@ -156,7 +163,59 @@ func (r *GormMessageRepository) CreateRegeneration(ctx context.Context, userID, 
 	})
 }
 
-func (r *GormMessageRepository) ActivateResponse(ctx context.Context, userID, conversationID, messageID string) (model.Message, error) {
+func (r *GormMessageRepository) CreateEditedTurn(ctx context.Context, userID, targetMessageID string, userMessage, assistantMessage *model.Message) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var conversation model.Conversation
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", userMessage.ConversationID, userID).First(&conversation).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return domain.ErrNotFound
+			}
+			return err
+		}
+		if assistantMessage.GenerationKey != nil {
+			var count int64
+			if err := tx.Model(&model.Message{}).Where("generation_key = ?", *assistantMessage.GenerationKey).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return domain.ErrAlreadyExists
+			}
+		}
+		var target model.Message
+		if err := tx.Where("id = ? AND conversation_id = ? AND role = 'user'", targetMessageID, userMessage.ConversationID).First(&target).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return domain.ErrNotFound
+			}
+			return err
+		}
+		if err := activateMessagePath(tx, target); err != nil {
+			return err
+		}
+		if err := siblingQuery(tx, target.ConversationID, "user", target.ParentMessageID).
+			Update("is_active_child", false).Error; err != nil {
+			return err
+		}
+		userMessage.ParentMessageID = target.ParentMessageID
+		userMessage.IsActiveChild = true
+		userMessage.EditedFrom = &targetMessageID
+		if err := tx.Create(userMessage).Error; err != nil {
+			return err
+		}
+		assistantMessage.ConversationID = target.ConversationID
+		assistantMessage.ParentMessageID = &userMessage.ID
+		assistantMessage.ReplyToMessageID = &userMessage.ID
+		assistantMessage.ResponseVersion = 1
+		assistantMessage.IsActiveResponse = true
+		assistantMessage.IsActiveChild = true
+		if err := tx.Create(assistantMessage).Error; err != nil {
+			return err
+		}
+		return invalidateConversationSummary(tx, target.ConversationID, true)
+	})
+}
+
+func (r *GormMessageRepository) ActivateBranch(ctx context.Context, userID, conversationID, messageID string) (model.Message, error) {
 	var selected model.Message
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var conversation model.Conversation
@@ -167,33 +226,77 @@ func (r *GormMessageRepository) ActivateResponse(ctx context.Context, userID, co
 			}
 			return err
 		}
-		err := tx.Where("id = ? AND conversation_id = ? AND role = 'assistant'", messageID, conversationID).First(&selected).Error
+		err := tx.Where("id = ? AND conversation_id = ?", messageID, conversationID).First(&selected).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return domain.ErrNotFound
 		}
 		if err != nil {
 			return err
 		}
-		if selected.ReplyToMessageID == nil {
-			return domain.ErrInvalid
-		}
-		if err := tx.Model(&model.Message{}).
-			Where("conversation_id = ? AND role = 'assistant' AND reply_to_message_id = ?", conversationID, *selected.ReplyToMessageID).
-			Update("is_active_response", false).Error; err != nil {
+		if err := activateMessagePath(tx, selected); err != nil {
 			return err
 		}
-		if err := tx.Model(&model.Message{}).Where("id = ?", selected.ID).Update("is_active_response", true).Error; err != nil {
-			return err
-		}
-		return tx.Model(&model.Conversation{}).Where("id = ?", conversationID).Updates(map[string]any{
-			"summary":                    "",
-			"summary_through_message_id": nil,
-			"summary_updated_at":         nil,
-		}).Error
+		return invalidateConversationSummary(tx, conversationID, false)
 	})
 	if err != nil {
 		return model.Message{}, err
 	}
-	selected.IsActiveResponse = true
+	selected.IsActiveChild = true
+	if selected.Role == "assistant" {
+		selected.IsActiveResponse = true
+	}
 	return selected, nil
+}
+
+// activateMessagePath selects a message and every ancestor leading to it.
+// This makes branch activation robust even when a client opens a deep node
+// from an inactive historical branch instead of navigating one level at a time.
+func activateMessagePath(tx *gorm.DB, selected model.Message) error {
+	current := selected
+	for {
+		deactivate := map[string]any{"is_active_child": false}
+		if current.Role == "assistant" {
+			deactivate["is_active_response"] = false
+		}
+		if err := siblingQuery(tx, current.ConversationID, current.Role, current.ParentMessageID).
+			Updates(deactivate).Error; err != nil {
+			return err
+		}
+		activate := map[string]any{"is_active_child": true}
+		if current.Role == "assistant" {
+			activate["is_active_response"] = true
+		}
+		if err := tx.Model(&model.Message{}).Where("id = ?", current.ID).Updates(activate).Error; err != nil {
+			return err
+		}
+		if current.ParentMessageID == nil {
+			return nil
+		}
+		var parent model.Message
+		if err := tx.Where("id = ? AND conversation_id = ?", *current.ParentMessageID, current.ConversationID).
+			First(&parent).Error; err != nil {
+			return err
+		}
+		current = parent
+	}
+}
+
+func siblingQuery(tx *gorm.DB, conversationID, role string, parentID *string) *gorm.DB {
+	query := tx.Model(&model.Message{}).Where("conversation_id = ? AND role = ?", conversationID, role)
+	if parentID == nil {
+		return query.Where("parent_message_id IS NULL")
+	}
+	return query.Where("parent_message_id = ?", *parentID)
+}
+
+func invalidateConversationSummary(tx *gorm.DB, conversationID string, touch bool) error {
+	updates := map[string]any{
+		"summary":                    "",
+		"summary_through_message_id": nil,
+		"summary_updated_at":         nil,
+	}
+	if touch {
+		updates["updated_at"] = gorm.Expr("CURRENT_TIMESTAMP")
+	}
+	return tx.Model(&model.Conversation{}).Where("id = ?", conversationID).Updates(updates).Error
 }

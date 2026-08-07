@@ -4,7 +4,7 @@ import AuthPanel from '@/components/AuthPanel.vue'
 import ChatPanel from '@/components/ChatPanel.vue'
 import ConversationSidebar from '@/components/ConversationSidebar.vue'
 import {
-  activateResponseVersion,
+  activateBranch,
   clearSession,
   createConversation,
   deleteConversation,
@@ -16,6 +16,7 @@ import {
   restoreSession,
   saveSession,
   streamMessage,
+  streamEditedMessage,
   streamRegeneratedMessage,
   type StreamHandlers
 } from '@/lib/api'
@@ -133,6 +134,13 @@ async function regenerate(message: Message, provider: string, model: string) {
 		streamRegeneratedMessage(conversationID, message.id, { provider, model }, handlers, signal, idempotencyKey))
 }
 
+async function editMessage(message: Message, content: string, provider: string, model: string) {
+	if (!activeID.value || message.role !== 'user') return
+	const conversationID = activeID.value
+	await runStreamingRequest(conversationID, '', (handlers, signal, idempotencyKey) =>
+		streamEditedMessage(conversationID, message.id, { content, provider, model }, handlers, signal, idempotencyKey))
+}
+
 function linkLegacyResponseToUser(message: Message) {
 	if (message.replyToMessageId) return
 	const index = messages.value.findIndex((item) => item.id === message.id)
@@ -140,6 +148,8 @@ function linkLegacyResponseToUser(message: Message) {
 		if (messages.value[current].role !== 'user') continue
 		messages.value = messages.value.map((item) => item.id === message.id ? {
 			...item,
+			parentMessageId: messages.value[current].id,
+			isActiveChild: true,
 			replyToMessageId: messages.value[current].id,
 			responseVersion: 1,
 			isActiveResponse: true
@@ -148,11 +158,11 @@ function linkLegacyResponseToUser(message: Message) {
 	}
 }
 
-async function switchResponseVersion(message: Message) {
+async function switchBranch(message: Message) {
 	if (!activeID.value || pending.value) return
 	try {
-		const selected = await activateResponseVersion(activeID.value, message.id)
-		markResponseActive(selected)
+		const selected = await activateBranch(activeID.value, message.id)
+		markBranchActive(selected)
 	} catch (cause) {
 		error.value = messageFor(cause)
 	}
@@ -173,7 +183,8 @@ async function runStreamingRequest(
   try {
 	await start({
       onMetadata(userMessage, assistantMessage) {
-		markResponseActive(assistantMessage)
+		markBranchActive(userMessage)
+		markBranchActive(assistantMessage)
 		liveTurns.set(conversationID, { userMessage, assistantMessage })
 		if (activeID.value === conversationID) {
 		  messages.value = mergeLiveTurn(messages.value, conversationID)
@@ -245,16 +256,22 @@ function stop() {
 }
 
 function replaceMessage(updated: Message) {
-	markResponseActive(updated)
+	markBranchActive(updated)
   messages.value = messages.value.map((item) => item.id === updated.id ? updated : item)
 }
 
-function markResponseActive(selected: Message) {
-	if (!selected.replyToMessageId || !selected.isActiveResponse) return
-	messages.value = messages.value.map((item) =>
-		item.role === 'assistant' && item.replyToMessageId === selected.replyToMessageId
-			? { ...item, isActiveResponse: item.id === selected.id }
-			: item)
+function markBranchActive(selected: Message) {
+	if (!selected.isActiveChild) return
+	messages.value = messages.value.map((item) => {
+		const sameParent = item.parentMessageId === selected.parentMessageId
+		if (item.role !== selected.role || !sameParent) return item
+		const active = item.id === selected.id
+		return {
+			...item,
+			isActiveChild: active,
+			...(item.role === 'assistant' ? { isActiveResponse: active } : {})
+		}
+	})
 }
 
 function mergeLiveTurn(items: Message[], conversationID: string): Message[] {
@@ -330,7 +347,8 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       :notice="streamNotice"
       @send="send"
 	  @regenerate="regenerate"
-	  @switch-version="switchResponseVersion"
+	  @edit-message="editMessage"
+	  @switch-version="switchBranch"
       @stop="stop"
     />
   </div>

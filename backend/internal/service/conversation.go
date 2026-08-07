@@ -39,13 +39,10 @@ func (s *ConversationService) ListMessages(ctx context.Context, userID, conversa
 	return s.messages.ListByConversationForUser(ctx, userID, conversationID)
 }
 
-func (s *ConversationService) ActivateResponse(ctx context.Context, userID, conversationID, messageID string) (model.Message, error) {
-	message, err := s.messages.ActivateResponse(ctx, userID, conversationID, messageID)
+func (s *ConversationService) ActivateBranch(ctx context.Context, userID, conversationID, messageID string) (model.Message, error) {
+	message, err := s.messages.ActivateBranch(ctx, userID, conversationID, messageID)
 	if errors.Is(err, domain.ErrNotFound) {
 		return model.Message{}, ErrMessageNotFound
-	}
-	if errors.Is(err, domain.ErrInvalid) {
-		return model.Message{}, ErrResponseNotSwitchable
 	}
 	return message, err
 }

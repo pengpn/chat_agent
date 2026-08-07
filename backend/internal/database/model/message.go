@@ -10,6 +10,9 @@ type Message struct {
 	Role             string        `json:"role" gorm:"type:text;not null;check:messages_role_check,role IN ('system', 'user', 'assistant', 'tool')"`
 	Content          string        `json:"content" gorm:"type:text;not null;default:''"`
 	Think            string        `json:"think,omitempty" gorm:"type:text;not null;default:''"`
+	ParentMessageID  *string       `json:"parentMessageId,omitempty" gorm:"type:uuid;index"`
+	IsActiveChild    bool          `json:"isActiveChild,omitempty" gorm:"not null;default:false;index"`
+	EditedFrom       *string       `json:"editedFromMessageId,omitempty" gorm:"type:uuid;index"`
 	ReplyToMessageID *string       `json:"replyToMessageId,omitempty" gorm:"type:uuid;index"`
 	ResponseVersion  int64         `json:"responseVersion,omitempty" gorm:"not null;default:0"`
 	IsActiveResponse bool          `json:"isActiveResponse,omitempty" gorm:"not null;default:false;index"`
