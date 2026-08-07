@@ -21,6 +21,7 @@ func (s *Server) Router() http.Handler {
 	protected.Use(middleware.Authenticate(s.jwt))
 	protected.GET("/auth/me", s.handlers.Me)
 	protected.GET("/models", s.handlers.Models)
+	protected.GET("/events", s.handlers.UserEvents)
 	protected.GET("/conversations", s.handlers.ListConversations)
 	protected.POST("/conversations", s.handlers.CreateConversation)
 	protected.GET("/conversations/:conversationID/messages", s.handlers.ListMessages)

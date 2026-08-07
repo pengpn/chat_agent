@@ -117,10 +117,76 @@ export type StreamHandlers = {
   onError: (message: string, assistantMessage?: Message) => void
 }
 
+export type UserEventHandlers = {
+  onConversationTitleUpdated: (conversation: Conversation) => void
+  onReset: () => void | Promise<void>
+}
+
 type StreamState = {
 	messageID: string
 	lastSequence: number
 	terminal: boolean
+}
+
+type UserEventState = { lastSequence: number }
+
+export async function subscribeUserEvents(handlers: UserEventHandlers, signal: AbortSignal): Promise<void> {
+	const state: UserEventState = { lastSequence: 0 }
+	let retry = 0
+	while (!signal.aborted) {
+		try {
+			const response = await fetch(`/api/v1/events?afterSequence=${state.lastSequence}`, {
+				headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+				signal
+			})
+			if (response.status === 409) {
+				state.lastSequence = 0
+				await handlers.onReset()
+				continue
+			}
+			if (!response.ok || !response.body) {
+				if (response.status === 401) throw new Error('登录状态已失效')
+				throw new Error(`用户事件连接失败 (${response.status})`)
+			}
+			retry = 0
+			await consumeUserEventStream(response, handlers, state, signal)
+		} catch (cause) {
+			if (signal.aborted) return
+			if (cause instanceof Error && cause.message === '登录状态已失效') throw cause
+			retry++
+			await abortableDelay(Math.min(500 * 2 ** Math.min(retry - 1, 4), 5_000), signal)
+		}
+	}
+}
+
+async function consumeUserEventStream(response: Response, handlers: UserEventHandlers, state: UserEventState, signal: AbortSignal): Promise<void> {
+	const reader = response.body!.getReader()
+	const decoder = new TextDecoder()
+	let buffer = ''
+	while (!signal.aborted) {
+		const { done, value } = await reader.read()
+		if (done) throw new Error('用户事件连接已断开')
+		buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+		const frames = buffer.split('\n\n')
+		buffer = frames.pop() || ''
+		for (const frame of frames) {
+			const event = frame.match(/^event:\s*(.+)$/m)?.[1]
+			const raw = frame.match(/^data:\s*(.+)$/m)?.[1]
+			if (!event || !raw) continue
+			const data = JSON.parse(raw)
+			if (event === 'stream.reset') {
+				state.lastSequence = 0
+				await handlers.onReset()
+				return
+			}
+			const sequence = Number(data.sequence) || 0
+			if (sequence <= state.lastSequence) continue
+			state.lastSequence = sequence
+			if (event === 'conversation.title.updated' && data.conversation) {
+				handlers.onConversationTitleUpdated(data.conversation)
+			}
+		}
+	}
 }
 
 export async function streamMessage(

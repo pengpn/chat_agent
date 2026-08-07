@@ -11,6 +11,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/service"
 	"github.com/example/agent-platform/backend/internal/streamcache"
 	"github.com/example/agent-platform/backend/internal/tool"
+	"github.com/example/agent-platform/backend/internal/userevent"
 )
 
 // Server owns the HTTP dependencies. Route composition lives in router.go.
@@ -28,6 +29,7 @@ func NewServer(repositories *repository.Repositories, jwtManager *auth.JWTManage
 // injects the Redis-backed limiter assembled in cmd/api.
 func NewServerWithRateLimiter(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, limiter llmgateway.RateLimiter, cfg config.Config) *Server {
 	streams := streamcache.New(cfg.StreamCacheTTL, cfg.StreamCacheMaxEvents)
+	userEvents := userevent.New(cfg.UserEventTTL, cfg.UserEventMaxEvents)
 	gateway := llmgateway.New(
 		providers,
 		llmgateway.NewModelTokenEstimator(providers),
@@ -55,8 +57,14 @@ func NewServerWithRateLimiter(repositories *repository.Repositories, jwtManager 
 				SummaryMaxCalls: cfg.ContextSummaryMaxCalls, QualityEnabled: cfg.ContextQualityEnabled,
 				QualityThreshold: cfg.ContextQualityThreshold, QualityMaxTokens: cfg.ContextQualityMaxTokens,
 			}),
+			service.NewTitle(repositories.Conversations, gateway, userEvents, service.TitleConfig{
+				Provider: cfg.TitleGenerationProvider, Model: cfg.TitleGenerationModel,
+				MaxOutputTokens: cfg.TitleGenerationMaxTokens, MaxLength: cfg.TitleGenerationMaxLength,
+				Timeout: cfg.TitleGenerationTimeout,
+			}),
 			service.NewCatalog(providers),
 			streams,
+			userEvents,
 		),
 		jwt:                jwtManager,
 		corsAllowedOrigins: cfg.CORSAllowedOrigins,

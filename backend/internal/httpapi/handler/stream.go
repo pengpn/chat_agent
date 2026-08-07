@@ -114,6 +114,9 @@ func (h *Handler) streamPreparedSession(c *gin.Context, flusher http.Flusher, se
 		return
 	}
 	h.logChatCompleted(c, completed, status)
+	if status == "complete" {
+		h.titles.Schedule(c.Request.Context(), session.UserID, session.AssistantMessage.ConversationID)
+	}
 	switch status {
 	case "complete":
 		h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "done", map[string]any{"assistantMessage": completed}, true)
@@ -217,6 +220,9 @@ func (h *Handler) ChatMessage(c *gin.Context) {
 		return
 	}
 	h.logChatCompleted(c, completed, completed.Status)
+	if completed.Status == "complete" {
+		h.titles.Schedule(c.Request.Context(), session.UserID, session.AssistantMessage.ConversationID)
+	}
 	response.WriteOKResp(c, gin.H{"userMessage": session.UserMessage, "assistantMessage": completed})
 }
 

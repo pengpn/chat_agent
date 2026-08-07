@@ -324,6 +324,7 @@ type Observation interface {
 
 type Record struct {
 	OperationID     string
+	Purpose         string
 	UserID          string
 	Provider        string
 	Model           string
@@ -346,6 +347,7 @@ type ZapObservation struct{}
 func (ZapObservation) Record(ctx context.Context, record Record) {
 	fields := []logger.Field{
 		logger.String("operation_id", record.OperationID), logger.String("user_id", record.UserID),
+		logger.String("purpose", record.Purpose),
 		logger.String("provider", record.Provider), logger.String("model", record.Model),
 		logger.String("mode", record.Mode), logger.Int("turn", record.Turn), logger.Int("attempt", record.Attempt),
 		logger.Int64("estimated_tokens", record.EstimatedTokens), logger.Int64("actual_tokens", record.ActualTokens), logger.Int64("stream_sequence", record.Sequence),
@@ -373,6 +375,7 @@ type Config struct {
 // 重试次数仅在 Gateway 内部使用。
 type Request struct {
 	OperationID string
+	Purpose     string
 	UserID      string
 	Provider    string
 	Model       string
@@ -678,7 +681,7 @@ func (g *gateway) observe(ctx context.Context, request Request, mode string, att
 	if retryCount < 0 {
 		retryCount = 0
 	}
-	g.observation.Record(ctx, Record{OperationID: request.OperationID, UserID: request.UserID, Provider: request.Provider, Model: request.Model, Mode: mode, Turn: request.Turn, Attempt: attempt, EstimatedTokens: estimated, ActualTokens: actual, Sequence: sequence, TTFTMS: ttftMS, RetryCount: retryCount, FinishReason: finishReason, Duration: time.Since(started), Status: status, Err: err})
+	g.observation.Record(ctx, Record{OperationID: request.OperationID, Purpose: request.Purpose, UserID: request.UserID, Provider: request.Provider, Model: request.Model, Mode: mode, Turn: request.Turn, Attempt: attempt, EstimatedTokens: estimated, ActualTokens: actual, Sequence: sequence, TTFTMS: ttftMS, RetryCount: retryCount, FinishReason: finishReason, Duration: time.Since(started), Status: status, Err: err})
 }
 
 func finishReasonForError(err error) string {

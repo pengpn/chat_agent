@@ -14,6 +14,7 @@ export interface AuthSession {
 export interface Conversation {
   id: string
   title: string
+  titleStatus?: 'default' | 'generating' | 'generated' | 'fallback' | 'manual'
   createdAt: string
   updatedAt: string
 }

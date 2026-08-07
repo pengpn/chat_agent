@@ -25,10 +25,12 @@ func (s *ConversationService) List(ctx context.Context, userID string) ([]model.
 
 func (s *ConversationService) Create(ctx context.Context, userID, title string) (model.Conversation, error) {
 	title = strings.TrimSpace(title)
+	titleStatus := "manual"
 	if title == "" {
 		title = "New conversation"
+		titleStatus = "default"
 	}
-	conversation := model.Conversation{UserID: userID, Title: truncate(title, 120)}
+	conversation := model.Conversation{UserID: userID, Title: truncate(title, 120), TitleStatus: titleStatus}
 	if err := s.conversations.Create(ctx, &conversation); err != nil {
 		return model.Conversation{}, err
 	}

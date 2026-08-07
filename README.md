@@ -9,6 +9,7 @@
 - [上下文 Token 管理实现解析](./docs/context-token-management.md)
 - [重新生成回答实现解析](./docs/regenerate-answer.md)
 - [编辑消息与对话分支实现解析](./docs/message-editing-and-conversation-branches.md)
+- [自动生成对话标题实现解析](./docs/automatic-conversation-title.md)
 
 实现思路借鉴了优秀开源项目中经过验证的分层理念：前端会话体验参考 [LibreChat](https://github.com/danny-avila/LibreChat) / [Open WebUI](https://github.com/open-webui/open-webui) 的多 Provider 对话模式；Provider 使用类似 LangChain 的统一消息与流事件接口。这里没有复制它们的代码，而是以更小、更适合学习的 Go 版本重新实现。
 
@@ -29,6 +30,7 @@
 - 长对话上下文管理：模型级窗口、Token 裁剪、持久化滚动摘要和摘要失败降级
 - 回答重新生成：复用原问题上下文、保留多个回答版本、版本切换、停止生成和幂等防重
 - 消息编辑与对话分支：不可变历史、问题分支切换、祖先路径恢复和分支隔离上下文
+- 自动对话标题：首个成功回答后异步生成、失败降级、手动改名保护及独立 Token/成本核算
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL
 
@@ -93,6 +95,7 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 | POST | `/api/v1/auth/register` | 注册并返回 token |
 | POST | `/api/v1/auth/login` | 登录 |
 | GET | `/api/v1/models` | 已配置、可用的 Provider / 模型 |
+| GET | `/api/v1/events` | 用户级 SSE：后台标题等工作空间事件与断线补发 |
 | GET/POST | `/api/v1/conversations` | 对话列表 / 新建对话 |
 | PATCH/DELETE | `/api/v1/conversations/:id` | 重命名 / 删除对话 |
 | GET | `/api/v1/conversations/:id/messages` | 获取消息历史 |
@@ -155,6 +158,14 @@ OPENAI_MODEL_LIMITS=gpt-4o-mini:32768:4096
 - `CONTEXT_SUMMARY_QUALITY_MAX_TOKENS`：质量评估最大输出预留，默认 `256`。
 
 日志事件 `conversation context prepared` 会记录 tokenizer、窗口、输出预留、原始/摘要/丢弃/最终 Token 估算、摘要模型、质量状态、摘要调用次数和最终保留的历史消息数。
+
+## 自动生成对话标题
+
+首个 assistant 回答成功落库后，后端异步生成简短标题，不阻塞流式回答的 `done` 事件。默认复用首轮模型；也可通过 `TITLE_GENERATION_PROVIDER` 和 `TITLE_GENERATION_MODEL` 路由到独立小模型。模型失败、超时或结果为空时，会清洗并截断对应用户问题作为降级标题。
+
+手动重命名会把标题状态设为 `manual`，正在执行的后台模型结果不能覆盖它。标题调用使用独立的 `purpose=conversation_title` 观测，并在会话表记录 Provider、模型、Token 和成本。`TITLE_GENERATION_MAX_TOKENS`、`TITLE_GENERATION_MAX_LENGTH` 和 `TITLE_GENERATION_TIMEOUT` 分别控制输出预留、最终字符数和任务超时。
+
+浏览器登录后维持 `/api/v1/events` 用户级 SSE。标题保存后服务端推送 `conversation.title.updated`，不再轮询会话列表；事件携带递增 `sequence`，`USER_EVENT_TTL` 和 `USER_EVENT_MAX_EVENTS` 控制断线补发窗口。缓存缺口或服务重启时，前端重新加载会话列表后从新序列继续订阅。
 
 非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature` 和 `outputFormat`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 

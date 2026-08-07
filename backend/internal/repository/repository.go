@@ -161,12 +161,25 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 	if err := migrateMessageTree(ctx, db); err != nil {
 		return err
 	}
+	// Titles created by older versions came either from the user or from the
+	// former frontend truncation. Treat them as manual so background generation
+	// can never overwrite them after this upgrade.
+	if err := db.WithContext(ctx).Exec(`
+		UPDATE conversations
+		SET title_status = 'manual'
+		WHERE title_status = 'default' AND title <> 'New conversation'
+	`).Error; err != nil {
+		return err
+	}
 	// GORM does not update an existing named CHECK constraint when its tag
 	// changes, so replace it explicitly when adding a new message state.
 	return db.WithContext(ctx).Exec(`
 		ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_status_check;
 		ALTER TABLE messages ADD CONSTRAINT messages_status_check
-		CHECK (status IN ('streaming', 'complete', 'stopped', 'interrupted', 'error'))
+		CHECK (status IN ('streaming', 'complete', 'stopped', 'interrupted', 'error'));
+		ALTER TABLE conversations DROP CONSTRAINT IF EXISTS conversations_title_status_check;
+		ALTER TABLE conversations ADD CONSTRAINT conversations_title_status_check
+		CHECK (title_status IN ('default', 'generating', 'generated', 'fallback', 'manual'))
 	`).Error
 }
 

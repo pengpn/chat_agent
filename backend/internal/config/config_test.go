@@ -76,6 +76,18 @@ func TestValidateSummaryTarget(t *testing.T) {
 	}
 }
 
+func TestValidateOptionalModelTarget(t *testing.T) {
+	providers := []ProviderConfig{{ID: "deepseek", APIKey: "key", Models: []string{"deepseek-chat"}}}
+	if err := validateOptionalModelTarget("TITLE_GENERATION", "deepseek", "deepseek-chat", providers); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range [][2]string{{"deepseek", ""}, {"", "deepseek-chat"}, {"deepseek", "missing"}, {"openai", "gpt"}} {
+		if err := validateOptionalModelTarget("TITLE_GENERATION", target[0], target[1], providers); err == nil {
+			t.Fatalf("target %#v unexpectedly passed", target)
+		}
+	}
+}
+
 func TestStreamConfigurationParsers(t *testing.T) {
 	t.Setenv("TEST_STREAM_TIMEOUT", "1500ms")
 	if timeout, err := positiveDurationEnv("TEST_STREAM_TIMEOUT", "2m"); err != nil || timeout != 1500*time.Millisecond {

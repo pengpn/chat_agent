@@ -58,6 +58,8 @@ type Config struct {
 	StreamTotalTimeout        time.Duration
 	StreamCacheTTL            time.Duration
 	StreamCacheMaxEvents      int
+	UserEventTTL              time.Duration
+	UserEventMaxEvents        int
 	EnableThinking            bool
 	ThinkingBudgetTokens      int
 	LLMTokenBudget            int64
@@ -76,6 +78,11 @@ type Config struct {
 	ContextQualityEnabled     bool
 	ContextQualityThreshold   int
 	ContextQualityMaxTokens   int64
+	TitleGenerationProvider   string
+	TitleGenerationModel      string
+	TitleGenerationMaxTokens  int64
+	TitleGenerationMaxLength  int
+	TitleGenerationTimeout    time.Duration
 	SystemPrompt              string
 	Providers                 []ProviderConfig
 }
@@ -137,6 +144,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	streamCacheMaxEvents, err := positiveIntEnv("STREAM_CACHE_MAX_EVENTS", 10_000)
+	if err != nil {
+		return Config{}, err
+	}
+	userEventTTL, err := positiveDurationEnv("USER_EVENT_TTL", "10m")
+	if err != nil {
+		return Config{}, err
+	}
+	userEventMaxEvents, err := positiveIntEnv("USER_EVENT_MAX_EVENTS", 1_000)
 	if err != nil {
 		return Config{}, err
 	}
@@ -219,6 +234,21 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	titleGenerationMaxTokens, err := positiveInt64Env("TITLE_GENERATION_MAX_TOKENS", 64)
+	if err != nil {
+		return Config{}, err
+	}
+	titleGenerationMaxLength, err := positiveIntEnv("TITLE_GENERATION_MAX_LENGTH", 40)
+	if err != nil {
+		return Config{}, err
+	}
+	if titleGenerationMaxLength > 120 {
+		return Config{}, fmt.Errorf("TITLE_GENERATION_MAX_LENGTH must not exceed 120")
+	}
+	titleGenerationTimeout, err := positiveDurationEnv("TITLE_GENERATION_TIMEOUT", "15s")
+	if err != nil {
+		return Config{}, err
+	}
 
 	providers, err := configuredProviders(streamConnectTimeout, llmTokenBudget, llmMaxOutputTokens)
 	if err != nil {
@@ -245,6 +275,8 @@ func Load() (Config, error) {
 		StreamTotalTimeout:        streamTotalTimeout,
 		StreamCacheTTL:            streamCacheTTL,
 		StreamCacheMaxEvents:      streamCacheMaxEvents,
+		UserEventTTL:              userEventTTL,
+		UserEventMaxEvents:        userEventMaxEvents,
 		EnableThinking:            enableThinking,
 		ThinkingBudgetTokens:      thinkingBudgetTokens,
 		LLMTokenBudget:            llmTokenBudget,
@@ -263,6 +295,11 @@ func Load() (Config, error) {
 		ContextQualityEnabled:     contextQualityEnabled,
 		ContextQualityThreshold:   contextQualityThreshold,
 		ContextQualityMaxTokens:   contextQualityMaxTokens,
+		TitleGenerationProvider:   strings.TrimSpace(os.Getenv("TITLE_GENERATION_PROVIDER")),
+		TitleGenerationModel:      strings.TrimSpace(os.Getenv("TITLE_GENERATION_MODEL")),
+		TitleGenerationMaxTokens:  titleGenerationMaxTokens,
+		TitleGenerationMaxLength:  titleGenerationMaxLength,
+		TitleGenerationTimeout:    titleGenerationTimeout,
 		SystemPrompt:              env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
 		Providers:                 providers,
 	}
@@ -278,6 +315,9 @@ func Load() (Config, error) {
 	}
 	cfg.Providers = configured
 	if err := validateSummaryTarget(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateOptionalModelTarget("TITLE_GENERATION", cfg.TitleGenerationProvider, cfg.TitleGenerationModel, cfg.Providers); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -304,6 +344,29 @@ func validateSummaryTarget(cfg Config) error {
 		return fmt.Errorf("CONTEXT_SUMMARY_MODEL %q is not enabled for provider %q", modelName, providerID)
 	}
 	return fmt.Errorf("CONTEXT_SUMMARY_PROVIDER %q is not configured with an API key", providerID)
+}
+
+func validateOptionalModelTarget(prefix, providerID, modelName string, providers []ProviderConfig) error {
+	providerID = strings.TrimSpace(providerID)
+	modelName = strings.TrimSpace(modelName)
+	if (providerID == "") != (modelName == "") {
+		return fmt.Errorf("%s_PROVIDER and %s_MODEL must be configured together", prefix, prefix)
+	}
+	if providerID == "" {
+		return nil
+	}
+	for _, candidate := range providers {
+		if candidate.ID != providerID {
+			continue
+		}
+		for _, model := range candidate.Models {
+			if model == modelName {
+				return nil
+			}
+		}
+		return fmt.Errorf("%s_MODEL %q is not enabled for provider %q", prefix, modelName, providerID)
+	}
+	return fmt.Errorf("%s_PROVIDER %q is not configured with an API key", prefix, providerID)
 }
 
 func configuredProviders(connectTimeout time.Duration, defaultContextWindow, defaultMaxOutputTokens int64) ([]ProviderConfig, error) {

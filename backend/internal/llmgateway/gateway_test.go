@@ -172,6 +172,17 @@ func TestGatewayObservationRecordsTTFTRetryAndFinishReason(t *testing.T) {
 	if chatRecord.RetryCount != 1 || chatRecord.FinishReason != "stop" {
 		t.Fatalf("chat observation = %#v", chatRecord)
 	}
+
+	purposeObservation := &recordingObservation{}
+	purposeGateway := New(fakeCatalog{client: &fakeClient{}}, HeuristicTokenEstimator{}, nil, NewMemoryIdempotencyStore(time.Hour), purposeObservation, Config{TokenBudget: 1_000, MaxOutputTokens: 4})
+	purposeRequest := testRequest("hello")
+	purposeRequest.Purpose = "conversation_title"
+	if _, err := purposeGateway.Chat(context.Background(), purposeRequest); err != nil {
+		t.Fatal(err)
+	}
+	if got := purposeObservation.last(t).Purpose; got != "conversation_title" {
+		t.Fatalf("purpose = %q", got)
+	}
 }
 
 func TestGatewayValidatesStructuredChatAndRetriesInvalidResult(t *testing.T) {

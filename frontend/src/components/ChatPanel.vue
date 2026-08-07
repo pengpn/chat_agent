@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import { shouldSendComposerMessage } from '@/lib/composer-keyboard'
+import { isNearScrollBottom } from '@/lib/scroll'
 import type { Conversation, Message, ModelProvider } from '@/types'
 
 const props = defineProps<{
@@ -24,6 +26,7 @@ const draft = ref('')
 const selectedProvider = ref('')
 const selectedModel = ref('')
 const viewport = ref<HTMLElement | null>(null)
+const followLatestMessage = ref(true)
 const editingID = ref<string | null>(null)
 const editDraft = ref('')
 
@@ -83,25 +86,37 @@ watch(models, (items) => {
   if (!items.includes(selectedModel.value)) selectedModel.value = items[0] || ''
 }, { immediate: true })
 watch(() => props.messages.map((item) => `${item.content}\u0000${item.think ?? ''}`).join('\u0001'), async () => {
+  if (!followLatestMessage.value) return
   await nextTick()
-  viewport.value?.scrollTo({ top: viewport.value.scrollHeight, behavior: 'smooth' })
+  viewport.value?.scrollTo({ top: viewport.value.scrollHeight, behavior: 'auto' })
 })
+
+function onViewportScroll() {
+  const element = viewport.value
+  if (element) followLatestMessage.value = isNearScrollBottom(element)
+}
+
+function resumeFollowingLatestMessage() {
+  followLatestMessage.value = true
+}
 
 function send() {
   const content = draft.value.trim()
   if (!content || props.pending || !selectedProvider.value || !selectedModel.value) return
+  resumeFollowingLatestMessage()
   draft.value = ''
   emit('send', content, selectedProvider.value, selectedModel.value)
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() }
+  if (shouldSendComposerMessage(event)) { event.preventDefault(); send() }
 }
 
 function roleName(message: Message) { return message.role === 'user' ? '你' : message.provider ? `${message.provider} · ${message.model}` : '智能助理' }
 
 function regenerate(message: Message) {
   if (props.pending || !selectedProvider.value || !selectedModel.value) return
+  resumeFollowingLatestMessage()
   emit('regenerate', message, selectedProvider.value, selectedModel.value)
 }
 
@@ -120,6 +135,7 @@ function cancelEditing() {
 function submitEdit(message: Message) {
 	const content = editDraft.value.trim()
 	if (!content || content === message.content || props.pending || !selectedProvider.value || !selectedModel.value) return
+	resumeFollowingLatestMessage()
 	emit('editMessage', message, content, selectedProvider.value, selectedModel.value)
 	cancelEditing()
 }
@@ -141,11 +157,17 @@ function switchVersion(versions: Message[], current: Message, offset: number) {
   const target = versions[index + offset]
   if (target) {
     cancelEditing()
+    resumeFollowingLatestMessage()
     emit('switchVersion', target)
   }
 }
 
-watch(() => props.conversation?.id, cancelEditing)
+watch(() => props.conversation?.id, async () => {
+  cancelEditing()
+  resumeFollowingLatestMessage()
+  await nextTick()
+  viewport.value?.scrollTo({ top: viewport.value.scrollHeight, behavior: 'auto' })
+})
 </script>
 
 <template>
@@ -158,7 +180,7 @@ watch(() => props.conversation?.id, cancelEditing)
       <div class="model-indicator"><span class="status-dot" />{{ providerLabel }} · {{ selectedModel || '未配置' }}</div>
     </header>
 
-    <div ref="viewport" class="messages">
+    <div ref="viewport" class="messages" @scroll.passive="onViewportScroll">
       <section v-if="!conversation" class="welcome-state">
         <div class="welcome-mark" aria-hidden="true"><i /><i /><i /><i /></div>
         <p class="eyebrow">START A NEW CONVERSATION</p>
@@ -170,7 +192,7 @@ watch(() => props.conversation?.id, cancelEditing)
         <h1>从一个问题开始</h1>
         <p>你的每一段对话都会保留上下文，方便随时继续。</p>
       </section>
-      <article v-for="entry in displayMessages" :key="`${entry.message.role}:${entry.message.parentMessageId || 'root'}`" class="message" :class="entry.message.role">
+      <article v-for="entry in displayMessages" :key="entry.message.id" class="message" :class="entry.message.role">
         <div class="message-meta"><span class="message-avatar" :class="{ agent: entry.message.role !== 'user' }">{{ entry.message.role === 'user' ? '你' : 'a' }}</span>{{ roleName(entry.message) }}</div>
 		<div v-if="entry.message.role === 'user' && editingID === entry.message.id" class="message-edit-form">
 			<label :for="`edit-${entry.message.id}`">编辑消息</label>

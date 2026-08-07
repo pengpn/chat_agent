@@ -18,6 +18,7 @@ import {
   streamMessage,
   streamEditedMessage,
   streamRegeneratedMessage,
+	subscribeUserEvents,
   type StreamHandlers
 } from '@/lib/api'
 import type { AuthSession, Conversation, Message, ModelProvider, User } from '@/types'
@@ -33,6 +34,7 @@ const error = ref('')
 const streamNotice = ref('')
 const streamControllers = shallowReactive(new Map<string, AbortController>())
 const liveTurns = reactive(new Map<string, { userMessage: Message; assistantMessage: Message }>())
+let userEventsController: AbortController | null = null
 
 const activeConversation = computed(() => conversations.value.find((item) => item.id === activeID.value) ?? null)
 const pending = computed(() => Boolean(activeID.value && streamControllers.has(activeID.value)))
@@ -42,6 +44,7 @@ onMounted(async () => {
     try {
       user.value = await getMe()
       await loadWorkspace()
+	  startUserEvents()
     } catch {
       logout()
     } finally {
@@ -50,13 +53,17 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(abortAllStreams)
+onBeforeUnmount(() => {
+	abortAllStreams()
+	userEventsController?.abort()
+})
 
 async function authenticated(session: AuthSession) {
   saveSession(session)
   user.value = session.user
   try {
     await loadWorkspace()
+	startUserEvents()
   } catch {
     logout()
   }
@@ -122,7 +129,7 @@ async function removeConversation(conversation: Conversation) {
 async function send(content: string, provider: string, model: string) {
 	if (!activeID.value) return
 	const conversationID = activeID.value
-	await runStreamingRequest(conversationID, content, (handlers, signal, idempotencyKey) =>
+	await runStreamingRequest(conversationID, (handlers, signal, idempotencyKey) =>
 		streamMessage(conversationID, { content, provider, model }, handlers, signal, idempotencyKey))
 }
 
@@ -130,14 +137,14 @@ async function regenerate(message: Message, provider: string, model: string) {
 	if (!activeID.value || message.role !== 'assistant') return
 	const conversationID = activeID.value
 	linkLegacyResponseToUser(message)
-	await runStreamingRequest(conversationID, '', (handlers, signal, idempotencyKey) =>
+	await runStreamingRequest(conversationID, (handlers, signal, idempotencyKey) =>
 		streamRegeneratedMessage(conversationID, message.id, { provider, model }, handlers, signal, idempotencyKey))
 }
 
 async function editMessage(message: Message, content: string, provider: string, model: string) {
 	if (!activeID.value || message.role !== 'user') return
 	const conversationID = activeID.value
-	await runStreamingRequest(conversationID, '', (handlers, signal, idempotencyKey) =>
+	await runStreamingRequest(conversationID, (handlers, signal, idempotencyKey) =>
 		streamEditedMessage(conversationID, message.id, { content, provider, model }, handlers, signal, idempotencyKey))
 }
 
@@ -170,7 +177,6 @@ async function switchBranch(message: Message) {
 
 async function runStreamingRequest(
 	conversationID: string,
-	firstMessageContent: string,
 	start: (handlers: StreamHandlers, signal: AbortSignal, idempotencyKey: string) => Promise<void>
 ) {
 	if (streamControllers.has(conversationID)) return
@@ -188,7 +194,6 @@ async function runStreamingRequest(
 		liveTurns.set(conversationID, { userMessage, assistantMessage })
 		if (activeID.value === conversationID) {
 		  messages.value = mergeLiveTurn(messages.value, conversationID)
-		  if (firstMessageContent) setConversationTitleFromFirstMessage(firstMessageContent)
 		}
       },
       onThink(delta) {
@@ -288,12 +293,23 @@ function mergeLiveTurn(items: Message[], conversationID: string): Message[] {
 	return merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 }
 
-function setConversationTitleFromFirstMessage(content: string) {
-  const conversation = activeConversation.value
-  if (!conversation || conversation.title !== 'New conversation' || messages.value.length > 2) return
-  const title = content.replace(/\s+/g, ' ').slice(0, 36)
-  conversation.title = title + (content.length > 36 ? '…' : '')
-  void updateTitle(conversation)
+function startUserEvents() {
+	userEventsController?.abort()
+	const controller = new AbortController()
+	userEventsController = controller
+	void subscribeUserEvents({
+		onConversationTitleUpdated(conversation) {
+			conversations.value = conversations.value
+				.map((item) => item.id === conversation.id ? conversation : item)
+				.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+		},
+		async onReset() {
+			if (!user.value) return
+			conversations.value = await listConversations()
+		}
+	}, controller.signal).catch((cause) => {
+		if (!controller.signal.aborted) error.value = messageFor(cause)
+	})
 }
 
 function refreshConversationOrder(id: string) {
@@ -305,6 +321,8 @@ function refreshConversationOrder(id: string) {
 
 function logout() {
 	abortAllStreams()
+	userEventsController?.abort()
+	userEventsController = null
   clearSession()
   user.value = null
   conversations.value = []
