@@ -12,11 +12,21 @@ import (
 )
 
 type Message struct {
-	Role             string     `json:"role"`
-	Content          string     `json:"content"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	Role             string        `json:"role"`
+	Content          string        `json:"content"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	Parts            []ContentPart `json:"-"`
+}
+
+// ContentPart is provider-neutral multimodal input. Adapters translate it to
+// OpenAI image_url blocks or Anthropic base64 image source blocks.
+type ContentPart struct {
+	Type      string
+	Text      string
+	MediaType string
+	Data      string
 }
 
 // ToolDefinition 是发送给模型的 OpenAI 兼容函数工具结构。
@@ -170,9 +180,10 @@ func (r *Registry) Tokenizer(providerID, model string) string {
 }
 
 type PublicProvider struct {
-	ID     string   `json:"id"`
-	Label  string   `json:"label"`
-	Models []string `json:"models"`
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	Models       []string `json:"models"`
+	VisionModels []string `json:"visionModels"`
 }
 
 type Registry struct {
@@ -246,10 +257,21 @@ func (r *Registry) SupportsThinking(id, model string) bool {
 func (r *Registry) Public() []PublicProvider {
 	result := make([]PublicProvider, 0, len(r.configs))
 	for _, cfg := range r.configs {
-		result = append(result, PublicProvider{ID: cfg.ID, Label: cfg.Label, Models: cfg.Models})
+		visionModels := make([]string, 0, len(cfg.VisionModels))
+		for _, model := range cfg.Models {
+			if cfg.VisionModels[model] {
+				visionModels = append(visionModels, model)
+			}
+		}
+		result = append(result, PublicProvider{ID: cfg.ID, Label: cfg.Label, Models: cfg.Models, VisionModels: visionModels})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Label < result[j].Label })
 	return result
+}
+
+func (r *Registry) SupportsVision(id, model string) bool {
+	cfg, ok := r.configs[id]
+	return ok && cfg.VisionModels[model]
 }
 
 func (r *Registry) IDs() []string {

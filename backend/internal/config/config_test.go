@@ -88,6 +88,33 @@ func TestValidateOptionalModelTarget(t *testing.T) {
 	}
 }
 
+func TestConfiguredProvidersIncludesQwenVisionModel(t *testing.T) {
+	t.Setenv("QWEN_MODELS", "qwen3-vl-flash")
+	t.Setenv("QWEN_VISION_MODELS", "qwen3-vl-flash")
+	t.Setenv("QWEN_MODEL_LIMITS", "qwen3-vl-flash:262144:32768")
+	providers, err := configuredProviders(10*time.Second, 32768, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range providers {
+		if item.ID != "qwen" {
+			continue
+		}
+		if item.BaseURL != "https://dashscope.aliyuncs.com/compatible-mode/v1" {
+			t.Fatalf("unexpected base URL: %s", item.BaseURL)
+		}
+		if !item.VisionModels["qwen3-vl-flash"] {
+			t.Fatal("qwen3-vl-flash should be a vision model")
+		}
+		limits := item.ModelLimits["qwen3-vl-flash"]
+		if limits.ContextWindow != 262144 || limits.MaxOutputTokens != 32768 {
+			t.Fatalf("unexpected limits: %+v", limits)
+		}
+		return
+	}
+	t.Fatal("qwen provider not found")
+}
+
 func TestStreamConfigurationParsers(t *testing.T) {
 	t.Setenv("TEST_STREAM_TIMEOUT", "1500ms")
 	if timeout, err := positiveDurationEnv("TEST_STREAM_TIMEOUT", "2m"); err != nil || timeout != 1500*time.Millisecond {

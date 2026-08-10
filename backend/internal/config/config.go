@@ -20,6 +20,7 @@ type ProviderConfig struct {
 	ModelPricing       map[string]ModelPricing `json:"-"`
 	ModelLimits        map[string]ModelLimits  `json:"-"`
 	ModelTokenizers    map[string]string       `json:"-"`
+	VisionModels       map[string]bool         `json:"-"`
 	ConnectTimeout     time.Duration           `json:"-"`
 }
 
@@ -46,6 +47,15 @@ type Config struct {
 	DatabaseConnMaxLifetime   time.Duration
 	DatabaseConnMaxIdleTime   time.Duration
 	RedisURL                  string
+	ObjectStorageEndpoint     string
+	ObjectStorageAccessKey    string
+	ObjectStorageSecretKey    string
+	ObjectStorageBucket       string
+	ObjectStorageRegion       string
+	ObjectStorageUseSSL       bool
+	AttachmentMaxBytes        int64
+	AttachmentMaxCount        int
+	AttachmentMaxTextChars    int
 	JWTSecret                 string
 	JWTTTL                    time.Duration
 	CORSAllowedOrigins        []string
@@ -249,6 +259,22 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	objectStorageUseSSL, err := boolEnv("OBJECT_STORAGE_USE_SSL", false)
+	if err != nil {
+		return Config{}, err
+	}
+	attachmentMaxBytes, err := positiveInt64Env("ATTACHMENT_MAX_BYTES", 10<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	attachmentMaxCount, err := positiveIntEnv("ATTACHMENT_MAX_COUNT", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	attachmentMaxTextChars, err := positiveIntEnv("ATTACHMENT_MAX_TEXT_CHARS", 200_000)
+	if err != nil {
+		return Config{}, err
+	}
 
 	providers, err := configuredProviders(streamConnectTimeout, llmTokenBudget, llmMaxOutputTokens)
 	if err != nil {
@@ -263,6 +289,15 @@ func Load() (Config, error) {
 		DatabaseConnMaxLifetime:   databaseConnMaxLifetime,
 		DatabaseConnMaxIdleTime:   databaseConnMaxIdleTime,
 		RedisURL:                  env("REDIS_URL", "redis://localhost:6379/0"),
+		ObjectStorageEndpoint:     env("OBJECT_STORAGE_ENDPOINT", "localhost:9000"),
+		ObjectStorageAccessKey:    env("OBJECT_STORAGE_ACCESS_KEY", "agent_minio"),
+		ObjectStorageSecretKey:    env("OBJECT_STORAGE_SECRET_KEY", "agent_minio_password"),
+		ObjectStorageBucket:       env("OBJECT_STORAGE_BUCKET", "chat-attachments"),
+		ObjectStorageRegion:       env("OBJECT_STORAGE_REGION", "us-east-1"),
+		ObjectStorageUseSSL:       objectStorageUseSSL,
+		AttachmentMaxBytes:        attachmentMaxBytes,
+		AttachmentMaxCount:        attachmentMaxCount,
+		AttachmentMaxTextChars:    attachmentMaxTextChars,
 		JWTSecret:                 os.Getenv("JWT_SECRET"),
 		JWTTTL:                    ttl,
 		CORSAllowedOrigins:        splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
@@ -375,6 +410,7 @@ func configuredProviders(connectTimeout time.Duration, defaultContextWindow, def
 	}
 	definitions := []providerDefinition{
 		{"openai", "OpenAI", "openai-compatible", "OPENAI", "https://api.openai.com/v1", "gpt-4o-mini"},
+		{"qwen", "通义千问", "openai-compatible", "QWEN", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3-vl-flash"},
 		{"kimi", "Kimi", "openai-compatible", "KIMI", "https://api.moonshot.cn/v1", "moonshot-v1-8k"},
 		{"anthropic", "Anthropic", "anthropic", "ANTHROPIC", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"},
 		{"deepseek", "DeepSeek", "openai-compatible", "DEEPSEEK", "https://api.deepseek.com/v1", "deepseek-chat"},
@@ -391,6 +427,20 @@ func configuredProviders(connectTimeout time.Duration, defaultContextWindow, def
 			return nil, err
 		}
 		models := splitCSV(env(definition.prefix+"_MODELS", definition.models))
+		visionModels := make(map[string]bool)
+		for _, model := range splitCSV(env(definition.prefix+"_VISION_MODELS", "")) {
+			enabled := false
+			for _, candidate := range models {
+				if candidate == model {
+					enabled = true
+					break
+				}
+			}
+			if !enabled {
+				return nil, fmt.Errorf("%s_VISION_MODELS model %q is not present in MODELS", definition.prefix, model)
+			}
+			visionModels[model] = true
+		}
 		limits, err := parseModelLimits(env(definition.prefix+"_MODEL_LIMITS", ""), models, ModelLimits{
 			ContextWindow: defaultContextWindow, MaxOutputTokens: defaultMaxOutputTokens,
 		})
@@ -421,6 +471,7 @@ func configuredProviders(connectTimeout time.Duration, defaultContextWindow, def
 			ModelPricing:       pricing,
 			ModelLimits:        limits,
 			ModelTokenizers:    tokenizers,
+			VisionModels:       visionModels,
 			ConnectTimeout:     connectTimeout,
 		})
 	}

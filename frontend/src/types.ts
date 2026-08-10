@@ -38,12 +38,32 @@ export interface Message {
   status: 'streaming' | 'complete' | 'stopped' | 'interrupted' | 'error'
   finishReason?: string
   createdAt: string
+	attachments?: Attachment[]
+}
+
+export interface Attachment {
+	id: string
+	conversationId: string
+	messageId?: string
+	name: string
+	extension: string
+	mimeType: string
+	size: number
+	kind: 'image' | 'document'
+	status: 'uploaded' | 'processing' | 'ready' | 'failed'
+	errorCode?: string
+	errorMessage?: string
+	chunkStatus: string
+	embeddingStatus: string
+	createdAt: string
+	updatedAt: string
 }
 
 export interface ModelProvider {
   id: string
   label: string
   models: string[]
+	visionModels: string[]
 }
 
 export interface CursorPage<T> {

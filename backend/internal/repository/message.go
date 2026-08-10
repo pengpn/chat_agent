@@ -33,6 +33,7 @@ func newMessageRepository(db *gorm.DB) *GormMessageRepository { return &GormMess
 func (r *GormMessageRepository) ListByConversationForUser(ctx context.Context, userID, conversationID string) ([]model.Message, error) {
 	items := make([]model.Message, 0)
 	err := r.db.WithContext(ctx).
+		Preload("Attachments").
 		Model(&model.Message{}).
 		Select("messages.*").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
@@ -48,6 +49,7 @@ func (r *GormMessageRepository) ListByConversationForUser(ctx context.Context, u
 func (r *GormMessageRepository) ListPageByConversationForUser(ctx context.Context, userID, conversationID string, cursor *pagination.Cursor, limit int) ([]model.Message, error) {
 	items := make([]model.Message, 0, limit+1)
 	query := r.db.WithContext(ctx).
+		Preload("Attachments").
 		Model(&model.Message{}).
 		Select("messages.*").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
@@ -62,6 +64,7 @@ func (r *GormMessageRepository) ListPageByConversationForUser(ctx context.Contex
 func (r *GormMessageRepository) FindByIDForUser(ctx context.Context, userID, conversationID, messageID string) (model.Message, error) {
 	var item model.Message
 	err := r.db.WithContext(ctx).
+		Preload("Attachments").
 		Model(&model.Message{}).
 		Select("messages.*").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").

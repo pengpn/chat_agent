@@ -28,6 +28,7 @@ type ChatService struct {
 	systemPrompt  string
 	stream        StreamConfig
 	context       ContextConfig
+	attachments   *AttachmentService
 }
 
 type StreamConfig struct {
@@ -49,11 +50,12 @@ type ContextConfig struct {
 }
 
 type ChatInput struct {
-	Content      string
-	Provider     string
-	Model        string
-	Temperature  *float64
-	OutputFormat string
+	Content       string
+	Provider      string
+	Model         string
+	Temperature   *float64
+	OutputFormat  string
+	AttachmentIDs []string
 	// IdempotencyKey comes from the HTTP Idempotency-Key header. It scopes one
 	// complete business message rather than individual model retries.
 	IdempotencyKey string
@@ -84,7 +86,7 @@ type RegenerateInput struct {
 	IdempotencyKey string
 }
 
-func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, outputFormats *outputformat.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig, contextConfig ContextConfig) *ChatService {
+func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, tools *tool.Registry, outputFormats *outputformat.Registry, maxToolCalls int, thinking *provider.ThinkingConfig, systemPrompt string, stream StreamConfig, contextConfig ContextConfig, attachmentServices ...*AttachmentService) *ChatService {
 	if outputFormats == nil {
 		outputFormats = outputformat.NewDefaultRegistry()
 	}
@@ -103,12 +105,16 @@ func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, t
 	if contextConfig.QualityMaxTokens <= 0 {
 		contextConfig.QualityMaxTokens = 256
 	}
-	return &ChatService{repository: repository, gateway: gateway, tools: tools, outputFormats: outputFormats, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream, context: contextConfig}
+	var attachments *AttachmentService
+	if len(attachmentServices) > 0 {
+		attachments = attachmentServices[0]
+	}
+	return &ChatService{repository: repository, gateway: gateway, tools: tools, outputFormats: outputFormats, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream, context: contextConfig, attachments: attachments}
 }
 
 func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string, input ChatInput) (*ChatSession, error) {
 	input.Content = strings.TrimSpace(input.Content)
-	if input.Content == "" || len([]rune(input.Content)) > 100_000 {
+	if (input.Content == "" && len(input.AttachmentIDs) == 0) || len([]rune(input.Content)) > 100_000 {
 		return nil, ErrInvalidMessageLength
 	}
 	if input.Temperature != nil && (*input.Temperature < 0 || *input.Temperature > 2) {
@@ -123,6 +129,16 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	}
 	if err := s.gateway.Validate(input.Provider, input.Model); err != nil {
 		return nil, &ProviderSelectionError{err: err}
+	}
+	var preparedAttachments PreparedAttachments
+	if len(input.AttachmentIDs) > 0 {
+		if s.attachments == nil {
+			return nil, ErrAttachmentNotFound
+		}
+		preparedAttachments, err = s.attachments.PrepareForChat(ctx, userID, conversationID, input.Provider, input.Model, input.AttachmentIDs)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var responseFormat *provider.ResponseFormat
 	if formatID := strings.TrimSpace(input.OutputFormat); formatID != "" {
@@ -165,16 +181,36 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		parentID := branch[len(branch)-1].ID
 		session.UserMessage.ParentMessageID = &parentID
 	}
-	if err := s.repository.CreateTurn(ctx, &session.UserMessage, &session.AssistantMessage); err != nil {
-		s.gateway.Abandon(operationID)
-		return nil, err
+	var createErr error
+	if len(input.AttachmentIDs) > 0 {
+		if repositoryWithAttachments, ok := s.repository.(interface {
+			CreateTurnWithAttachments(context.Context, string, []string, *model.Message, *model.Message) error
+		}); ok {
+			createErr = repositoryWithAttachments.CreateTurnWithAttachments(ctx, userID, uniqueStrings(input.AttachmentIDs), &session.UserMessage, &session.AssistantMessage)
+		} else {
+			createErr = ErrAttachmentNotFound
+		}
+	} else {
+		createErr = s.repository.CreateTurn(ctx, &session.UserMessage, &session.AssistantMessage)
 	}
+	if createErr != nil {
+		s.gateway.Abandon(operationID)
+		if errors.Is(createErr, domain.ErrNotFound) {
+			return nil, ErrAttachmentNotReady
+		}
+		return nil, createErr
+	}
+	for index := range preparedAttachments.Items {
+		messageID := session.UserMessage.ID
+		preparedAttachments.Items[index].MessageID = &messageID
+	}
+	session.UserMessage.Attachments = preparedAttachments.Items
 
 	requestMessages := make([]provider.Message, 0, 2)
 	if system := strings.TrimSpace(s.systemPrompt); system != "" {
 		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
 	}
-	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
+	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + preparedAttachments.DocumentText, Parts: preparedAttachments.Parts})
 	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
 		request.Tools = s.tools.Definitions()
@@ -308,6 +344,14 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 		ContextIsExplicitPath:    true,
 		RegeneratedFromMessageID: targetMessageID,
 	}
+	var regeneratedAttachments PreparedAttachments
+	if len(session.UserMessage.Attachments) > 0 && s.attachments != nil {
+		regeneratedAttachments, err = s.attachments.PrepareStoredForChat(ctx, input.Provider, input.Model, session.UserMessage.Attachments)
+		if err != nil {
+			s.gateway.Abandon(operationID)
+			return nil, err
+		}
+	}
 	if err := s.repository.CreateRegeneration(ctx, userID, targetMessageID, replyToID, &session.AssistantMessage); err != nil {
 		s.gateway.Abandon(operationID)
 		if errors.Is(err, domain.ErrAlreadyExists) {
@@ -323,7 +367,7 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 	if system := strings.TrimSpace(s.systemPrompt); system != "" {
 		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
 	}
-	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
+	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + regeneratedAttachments.DocumentText, Parts: regeneratedAttachments.Parts})
 	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
 		request.Tools = s.tools.Definitions()

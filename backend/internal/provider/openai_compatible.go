@@ -44,14 +44,14 @@ func NewOpenAICompatible(cfg config.ProviderConfig) Provider {
 func (p *openAICompatible) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
 	body := struct {
 		Model          string                `json:"model"`
-		Messages       []Message             `json:"messages"`
+		Messages       []any                 `json:"messages"`
 		Tools          []ToolDefinition      `json:"tools,omitempty"`
 		ToolChoice     string                `json:"tool_choice,omitempty"`
 		Thinking       *openAIThinking       `json:"thinking,omitempty"`
 		Temperature    *float64              `json:"temperature,omitempty"`
 		ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 		MaxTokens      int64                 `json:"max_tokens,omitempty"`
-	}{Model: request.Model, Messages: request.Messages, Tools: request.Tools, Temperature: request.Temperature, MaxTokens: request.MaxOutputTokens}
+	}{Model: request.Model, Messages: openAIMessages(request.Messages), Tools: request.Tools, Temperature: request.Temperature, MaxTokens: request.MaxOutputTokens}
 	if len(request.Tools) > 0 {
 		body.ToolChoice = "auto"
 	}
@@ -126,9 +126,9 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 		// 调用模型并解析 SSE
 		// 构建厂商请求
 		body := struct {
-			Model         string    `json:"model"`
-			Messages      []Message `json:"messages"`
-			Stream        bool      `json:"stream"`
+			Model         string `json:"model"`
+			Messages      []any  `json:"messages"`
+			Stream        bool   `json:"stream"`
 			StreamOptions *struct {
 				IncludeUsage bool `json:"include_usage"`
 			} `json:"stream_options,omitempty"`
@@ -138,7 +138,7 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 			Temperature    *float64              `json:"temperature,omitempty"`
 			ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 			MaxTokens      int64                 `json:"max_tokens,omitempty"`
-		}{Model: request.Model, Messages: request.Messages, Stream: true, Tools: request.Tools, Temperature: request.Temperature, MaxTokens: request.MaxOutputTokens}
+		}{Model: request.Model, Messages: openAIMessages(request.Messages), Stream: true, Tools: request.Tools, Temperature: request.Temperature, MaxTokens: request.MaxOutputTokens}
 		if len(request.Tools) > 0 {
 			body.ToolChoice = "auto"
 		}
@@ -314,6 +314,32 @@ func (p *openAICompatible) ChatStream(ctx context.Context, request ChatRequest) 
 		sendEvent(ctx, events, StreamEvent{Err: NewStreamError(StreamErrorDisconnected, io.ErrUnexpectedEOF)})
 	}()
 	return events
+}
+
+func openAIMessages(messages []Message) []any {
+	result := make([]any, 0, len(messages))
+	for _, message := range messages {
+		if len(message.Parts) == 0 {
+			result = append(result, message)
+			continue
+		}
+		content := make([]map[string]any, 0, len(message.Parts)+1)
+		if message.Content != "" {
+			content = append(content, map[string]any{"type": "text", "text": message.Content})
+		}
+		for _, part := range message.Parts {
+			switch part.Type {
+			case "text":
+				if part.Text != "" {
+					content = append(content, map[string]any{"type": "text", "text": part.Text})
+				}
+			case "image":
+				content = append(content, map[string]any{"type": "image_url", "image_url": map[string]string{"url": "data:" + part.MediaType + ";base64," + part.Data}})
+			}
+		}
+		result = append(result, map[string]any{"role": message.Role, "content": content})
+	}
+	return result
 }
 
 func (p *openAICompatible) responseFormat(format *ResponseFormat) *openAIResponseFormat {

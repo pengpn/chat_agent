@@ -227,11 +227,11 @@ async function removeConversation(conversation: Conversation) {
   }
 }
 
-async function send(content: string, provider: string, model: string) {
+async function send(content: string, provider: string, model: string, attachmentIDs: string[]) {
 	if (!activeID.value) return
 	const conversationID = activeID.value
 	await runStreamingRequest(conversationID, (handlers, signal, idempotencyKey) =>
-		streamMessage(conversationID, { content, provider, model }, handlers, signal, idempotencyKey))
+		streamMessage(conversationID, { content, provider, model, attachmentIds: attachmentIDs }, handlers, signal, idempotencyKey))
 }
 
 async function regenerate(message: Message, provider: string, model: string) {

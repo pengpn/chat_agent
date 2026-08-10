@@ -20,10 +20,15 @@ const (
 type ConversationService struct {
 	conversations repository.ConversationRepository
 	messages      repository.MessageRepository
+	attachments   *AttachmentService
 }
 
-func NewConversation(conversations repository.ConversationRepository, messages repository.MessageRepository) *ConversationService {
-	return &ConversationService{conversations: conversations, messages: messages}
+func NewConversation(conversations repository.ConversationRepository, messages repository.MessageRepository, attachmentServices ...*AttachmentService) *ConversationService {
+	var attachments *AttachmentService
+	if len(attachmentServices) > 0 {
+		attachments = attachmentServices[0]
+	}
+	return &ConversationService{conversations: conversations, messages: messages, attachments: attachments}
 }
 
 func (s *ConversationService) List(ctx context.Context, userID string) ([]model.Conversation, error) {
@@ -125,9 +130,20 @@ func (s *ConversationService) UpdateTitle(ctx context.Context, userID, conversat
 }
 
 func (s *ConversationService) Delete(ctx context.Context, userID, conversationID string) error {
+	var objectKeys []string
+	if s.attachments != nil {
+		var err error
+		objectKeys, err = s.attachments.CleanupConversation(ctx, userID, conversationID)
+		if err != nil {
+			return err
+		}
+	}
 	err := s.conversations.Delete(ctx, userID, conversationID)
 	if errors.Is(err, domain.ErrNotFound) {
 		return ErrConversationNotFound
+	}
+	if err == nil && s.attachments != nil {
+		s.attachments.DeleteObjects(ctx, objectKeys)
 	}
 	return err
 }

@@ -27,13 +27,18 @@ type anthropicThinking struct {
 	Display      string `json:"display"`
 }
 
+type anthropicInputMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
 func NewAnthropic(cfg config.ProviderConfig) Provider {
 	return &anthropic{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, client: newHTTPClient(cfg.ConnectTimeout)}
 }
 
 func (p *anthropic) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
 	var systemParts []string
-	messages := make([]Message, 0, len(request.Messages))
+	messages := make([]anthropicInputMessage, 0, len(request.Messages))
 	for _, message := range request.Messages {
 		if message.Role == "system" {
 			if content := strings.TrimSpace(message.Content); content != "" {
@@ -41,7 +46,7 @@ func (p *anthropic) Chat(ctx context.Context, request ChatRequest) (ChatResponse
 			}
 			continue
 		}
-		messages = append(messages, message)
+		messages = append(messages, anthropicMessage(message))
 	}
 	system := strings.Join(systemParts, "\n\n")
 	maxTokens := request.MaxOutputTokens
@@ -49,12 +54,12 @@ func (p *anthropic) Chat(ctx context.Context, request ChatRequest) (ChatResponse
 		maxTokens = anthropicMaxTokens
 	}
 	body := struct {
-		Model       string             `json:"model"`
-		System      string             `json:"system,omitempty"`
-		Messages    []Message          `json:"messages"`
-		MaxTokens   int64              `json:"max_tokens"`
-		Thinking    *anthropicThinking `json:"thinking,omitempty"`
-		Temperature *float64           `json:"temperature,omitempty"`
+		Model       string                  `json:"model"`
+		System      string                  `json:"system,omitempty"`
+		Messages    []anthropicInputMessage `json:"messages"`
+		MaxTokens   int64                   `json:"max_tokens"`
+		Thinking    *anthropicThinking      `json:"thinking,omitempty"`
+		Temperature *float64                `json:"temperature,omitempty"`
 	}{Model: request.Model, System: system, Messages: messages, MaxTokens: maxTokens, Temperature: request.Temperature}
 	body.Thinking = anthropicThinkingRequest(request)
 	if body.Thinking != nil {
@@ -114,7 +119,7 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 	go func() {
 		defer close(events)
 		var systemParts []string
-		messages := make([]Message, 0, len(request.Messages))
+		messages := make([]anthropicInputMessage, 0, len(request.Messages))
 		for _, message := range request.Messages {
 			if message.Role == "system" {
 				if content := strings.TrimSpace(message.Content); content != "" {
@@ -122,7 +127,7 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 				}
 				continue
 			}
-			messages = append(messages, message)
+			messages = append(messages, anthropicMessage(message))
 		}
 		system := strings.Join(systemParts, "\n\n")
 		maxTokens := request.MaxOutputTokens
@@ -130,13 +135,13 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 			maxTokens = anthropicMaxTokens
 		}
 		body := struct {
-			Model       string             `json:"model"`
-			System      string             `json:"system,omitempty"`
-			Messages    []Message          `json:"messages"`
-			MaxTokens   int64              `json:"max_tokens"`
-			Stream      bool               `json:"stream"`
-			Thinking    *anthropicThinking `json:"thinking,omitempty"`
-			Temperature *float64           `json:"temperature,omitempty"`
+			Model       string                  `json:"model"`
+			System      string                  `json:"system,omitempty"`
+			Messages    []anthropicInputMessage `json:"messages"`
+			MaxTokens   int64                   `json:"max_tokens"`
+			Stream      bool                    `json:"stream"`
+			Thinking    *anthropicThinking      `json:"thinking,omitempty"`
+			Temperature *float64                `json:"temperature,omitempty"`
 		}{Model: request.Model, System: system, Messages: messages, MaxTokens: maxTokens, Stream: true, Temperature: request.Temperature}
 		body.Thinking = anthropicThinkingRequest(request)
 		if body.Thinking != nil {
@@ -240,6 +245,27 @@ func (p *anthropic) ChatStream(ctx context.Context, request ChatRequest) <-chan 
 		sendEvent(ctx, events, StreamEvent{Err: NewStreamError(StreamErrorDisconnected, io.ErrUnexpectedEOF)})
 	}()
 	return events
+}
+
+func anthropicMessage(message Message) anthropicInputMessage {
+	if len(message.Parts) == 0 {
+		return anthropicInputMessage{Role: message.Role, Content: message.Content}
+	}
+	blocks := make([]map[string]any, 0, len(message.Parts)+1)
+	if message.Content != "" {
+		blocks = append(blocks, map[string]any{"type": "text", "text": message.Content})
+	}
+	for _, part := range message.Parts {
+		switch part.Type {
+		case "text":
+			if part.Text != "" {
+				blocks = append(blocks, map[string]any{"type": "text", "text": part.Text})
+			}
+		case "image":
+			blocks = append(blocks, map[string]any{"type": "image", "source": map[string]string{"type": "base64", "media_type": part.MediaType, "data": part.Data}})
+		}
+	}
+	return anthropicInputMessage{Role: message.Role, Content: blocks}
 }
 
 func anthropicThinkingRequest(request ChatRequest) *anthropicThinking {

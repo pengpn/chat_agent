@@ -29,6 +29,7 @@ type Message struct {
 	UsageReported    bool          `json:"usageReported" gorm:"not null;default:false"`
 	CostNanoUSD      int64         `json:"costNanoUsd" gorm:"not null;default:0"`
 	CostKnown        bool          `json:"costKnown" gorm:"not null;default:false"`
+	Attachments      []Attachment  `json:"attachments,omitempty" gorm:"foreignKey:MessageID"`
 	CreatedAt        time.Time     `json:"createdAt" gorm:"index:messages_conversation_created_idx,priority:2,sort:desc"`
 	UpdatedAt        time.Time     `json:"-"`
 }

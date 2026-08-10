@@ -15,6 +15,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/httpapi"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
+	"github.com/example/agent-platform/backend/internal/objectstore"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/redis/go-redis/v9"
@@ -55,6 +56,21 @@ func main() {
 
 	jwtManager := auth.NewJWTManager(cfg.JWTSecret, cfg.JWTTTL)
 	providers := provider.NewRegistry(cfg.Providers)
+	store, err := objectstore.NewMinIO(objectstore.Config{
+		Endpoint: cfg.ObjectStorageEndpoint, AccessKey: cfg.ObjectStorageAccessKey, SecretKey: cfg.ObjectStorageSecretKey,
+		Bucket: cfg.ObjectStorageBucket, Region: cfg.ObjectStorageRegion, UseSSL: cfg.ObjectStorageUseSSL,
+	})
+	if err != nil {
+		logger.Error(context.Background(), "object storage configuration failed", logger.Err(err))
+		os.Exit(1)
+	}
+	storageCtx, cancelStorage := context.WithTimeout(context.Background(), 10*time.Second)
+	err = store.EnsureBucket(storageCtx)
+	cancelStorage()
+	if err != nil {
+		logger.Error(context.Background(), "object storage initialization failed", logger.Err(err))
+		os.Exit(1)
+	}
 	var limiter llmgateway.RateLimiter
 	var redisClient *redis.Client
 	if cfg.LLMRateTokensPerMinute > 0 {
@@ -75,7 +91,7 @@ func main() {
 		defer redisClient.Close()
 		limiter = llmgateway.NewTokenBucketLimiter(redisClient, cfg.LLMRateTokensPerMinute, cfg.LLMRateBurst, "")
 	}
-	server := httpapi.NewServerWithRateLimiter(repositories, jwtManager, providers, limiter, cfg)
+	server := httpapi.NewServerWithObjectStore(repositories, jwtManager, providers, limiter, store, cfg)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

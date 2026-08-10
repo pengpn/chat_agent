@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
+import { deleteAttachment, downloadAttachment, retryAttachment, uploadAttachment } from '@/lib/api'
 import { shouldSendComposerMessage } from '@/lib/composer-keyboard'
 import { buildDisplayMessages } from '@/lib/message-tree'
 import { isNearScrollBottom } from '@/lib/scroll'
-import type { Conversation, Message, ModelProvider } from '@/types'
+import type { Attachment, Conversation, Message, ModelProvider } from '@/types'
 
 const props = defineProps<{
   conversation: Conversation | null
@@ -19,7 +20,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  send: [content: string, provider: string, model: string]
+  send: [content: string, provider: string, model: string, attachmentIDs: string[]]
   regenerate: [message: Message, provider: string, model: string]
   editMessage: [message: Message, content: string, provider: string, model: string]
   switchVersion: [message: Message]
@@ -35,10 +36,19 @@ const followLatestMessage = ref(true)
 const preservingOlderMessageScroll = ref(false)
 const editingID = ref<string | null>(null)
 const editDraft = ref('')
+const attachments = ref<Attachment[]>([])
+const uploading = ref(0)
+const attachmentError = ref('')
+const draggingFiles = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
 
 const models = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.models ?? [])
 const providerLabel = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.label ?? '选择模型')
 const displayMessages = computed(() => buildDisplayMessages(props.messages))
+const selectedProviderConfig = computed(() => props.providers.find((item) => item.id === selectedProvider.value))
+const hasImageAttachment = computed(() => attachments.value.some((item) => item.kind === 'image'))
+const visionUnsupported = computed(() => hasImageAttachment.value && !selectedProviderConfig.value?.visionModels?.includes(selectedModel.value))
+const attachmentBlocked = computed(() => uploading.value > 0 || attachments.value.some((item) => item.status !== 'ready') || visionUnsupported.value)
 
 watch(() => props.providers, (providers) => {
   if (!providers.length) return
@@ -83,10 +93,12 @@ function resumeFollowingLatestMessage() {
 
 function send() {
   const content = draft.value.trim()
-  if (!content || props.pending || !selectedProvider.value || !selectedModel.value) return
+  if ((!content && !attachments.value.length) || props.pending || attachmentBlocked.value || !selectedProvider.value || !selectedModel.value) return
   resumeFollowingLatestMessage()
   draft.value = ''
-  emit('send', content, selectedProvider.value, selectedModel.value)
+  const attachmentIDs = attachments.value.map((item) => item.id)
+  attachments.value = []
+  emit('send', content, selectedProvider.value, selectedModel.value, attachmentIDs)
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -143,13 +155,73 @@ function switchVersion(versions: Message[], current: Message, offset: number) {
   }
 }
 
-watch(() => props.conversation?.id, async () => {
+watch(() => props.conversation?.id, async (_current, previous) => {
+	if (previous) await clearPendingAttachments(previous)
   cancelEditing()
   preservingOlderMessageScroll.value = false
   resumeFollowingLatestMessage()
   await nextTick()
   viewport.value?.scrollTo({ top: viewport.value.scrollHeight, behavior: 'auto' })
 })
+
+async function addFiles(files: File[]) {
+	const conversationID = props.conversation?.id
+	if (!conversationID || props.pending) return
+	attachmentError.value = ''
+	const remaining = Math.max(0, 5 - attachments.value.length)
+	if (files.length > remaining) attachmentError.value = '每条消息最多添加 5 个附件。'
+	for (const file of files.slice(0, remaining)) {
+		uploading.value++
+		try {
+			const uploaded = await uploadAttachment(conversationID, file)
+			if (props.conversation?.id === conversationID) attachments.value.push(uploaded)
+			else await deleteAttachment(conversationID, uploaded.id)
+		}
+		catch (cause) { attachmentError.value = cause instanceof Error ? cause.message : '文件上传失败' }
+		finally { uploading.value-- }
+	}
+}
+
+function chooseFiles(event: Event) {
+	const input = event.target as HTMLInputElement
+	void addFiles(Array.from(input.files ?? []))
+	input.value = ''
+}
+
+function onDrop(event: DragEvent) {
+	draggingFiles.value = false
+	void addFiles(Array.from(event.dataTransfer?.files ?? []))
+}
+
+function onPaste(event: ClipboardEvent) {
+	const images = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith('image/'))
+	if (!images.length) return
+	event.preventDefault()
+	void addFiles(images)
+}
+
+async function removeAttachment(item: Attachment) {
+	const conversationID = props.conversation?.id; if (!conversationID) return
+	try { await deleteAttachment(conversationID, item.id); attachments.value = attachments.value.filter((candidate) => candidate.id !== item.id) }
+	catch (cause) { attachmentError.value = cause instanceof Error ? cause.message : '移除附件失败' }
+}
+
+async function retry(item: Attachment) {
+	const conversationID = props.conversation?.id; if (!conversationID) return
+	attachmentError.value = ''
+	try {
+		const updated = await retryAttachment(conversationID, item.id)
+		attachments.value = attachments.value.map((candidate) => candidate.id === updated.id ? updated : candidate)
+	} catch (cause) { attachmentError.value = cause instanceof Error ? cause.message : '重试失败' }
+}
+
+async function clearPendingAttachments(conversationID: string) {
+	const pendingItems = attachments.value; attachments.value = []; attachmentError.value = ''
+	await Promise.allSettled(pendingItems.map((item) => deleteAttachment(conversationID, item.id)))
+}
+
+function formatSize(bytes: number) { return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB` }
+function openAttachment(message: Message, item: Attachment) { void downloadAttachment(message.conversationId, item).catch((cause) => { attachmentError.value = cause instanceof Error ? cause.message : '下载失败' }) }
 </script>
 
 <template>
@@ -191,6 +263,12 @@ watch(() => props.conversation?.id, async () => {
 			</div>
 		</div>
 		<template v-else>
+		<div v-if="entry.message.attachments?.length" class="message-attachments" aria-label="消息附件">
+			<button v-for="item in entry.message.attachments" :key="item.id" type="button" @click="openAttachment(entry.message, item)">
+				<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></svg>
+				<span>{{ item.name }}</span><small>{{ formatSize(item.size) }}</small>
+			</button>
+		</div>
         <details v-if="entry.message.think" class="message-think" :open="entry.message.status === 'streaming'">
           <summary>思考过程</summary>
           <div class="message-think-content">{{ entry.message.think }}</div>
@@ -220,19 +298,35 @@ watch(() => props.conversation?.id, async () => {
       <p v-if="notice" class="stream-notice" role="status" aria-live="polite">{{ notice }}</p>
       <p v-if="error" class="stream-error" role="alert">{{ error }}</p>
       <div v-if="!providers.length" class="configuration-notice">当前工作空间暂未配置可用模型，请联系工作空间管理员。</div>
-      <div class="composer" :class="{ disabled: !conversation || !providers.length }">
-        <textarea v-model="draft" :disabled="!conversation || !providers.length || pending" placeholder="给 Agent 一个任务…" rows="1" @keydown="onKeydown" />
+      <div class="composer" :class="{ disabled: !conversation || !providers.length, 'is-dragging': draggingFiles }" @dragenter.prevent="draggingFiles = true" @dragover.prevent @dragleave.self="draggingFiles = false" @drop.prevent="onDrop">
+		<div v-if="draggingFiles" class="drop-overlay">松开即可添加文件</div>
+		<div v-if="attachments.length || uploading" class="attachment-list" aria-live="polite">
+			<div v-for="item in attachments" :key="item.id" class="attachment-chip" :class="item.status">
+				<div><strong>{{ item.name }}</strong><span>{{ item.status === 'failed' ? item.errorMessage : `${formatSize(item.size)} · ${item.kind === 'image' ? '图片' : '文档'}` }}</span></div>
+				<button v-if="item.status === 'failed'" type="button" aria-label="重试解析" @click="retry(item)">重试</button>
+				<button type="button" :aria-label="`移除 ${item.name}`" @click="removeAttachment(item)">×</button>
+			</div>
+			<div v-if="uploading" class="attachment-chip uploading"><span class="attachment-spinner" />正在安全上传并解析…</div>
+		</div>
+		<p v-if="visionUnsupported" class="attachment-inline-error" role="alert">当前模型不支持图片输入，请切换到标记为视觉能力的模型。</p>
+		<p v-if="attachmentError" class="attachment-inline-error" role="alert">{{ attachmentError }}</p>
+        <textarea v-model="draft" :disabled="!conversation || !providers.length || pending" placeholder="给 Agent 一个任务…" rows="1" @keydown="onKeydown" @paste="onPaste" />
         <div class="composer-bottom">
-          <div class="model-selects">
+		  <div class="composer-tools">
+			<input ref="fileInput" class="visually-hidden" type="file" multiple accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.pdf,.docx" @change="chooseFiles">
+			<button class="attach-button" type="button" :disabled="!conversation || pending || attachments.length >= 5" aria-label="添加图片或文件" title="添加图片或文件" @click="fileInput?.click()">
+				<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+			</button>
+		  <div class="model-selects">
             <select v-model="selectedProvider" :disabled="pending || !providers.length" aria-label="Provider">
               <option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.label }}</option>
             </select>
             <select v-model="selectedModel" :disabled="pending || !models.length" aria-label="模型">
-              <option v-for="model in models" :key="model" :value="model">{{ model }}</option>
+              <option v-for="model in models" :key="model" :value="model">{{ model }}{{ selectedProviderConfig?.visionModels?.includes(model) ? ' · 视觉' : '' }}</option>
             </select>
-          </div>
+		  </div></div>
           <button v-if="pending" class="stop-button" @click="emit('stop')"><span />停止生成</button>
-          <button v-else class="send-button" :disabled="!draft.trim() || !conversation || !selectedModel" @click="send">发送</button>
+          <button v-else class="send-button" :disabled="(!draft.trim() && !attachments.length) || attachmentBlocked || !conversation || !selectedModel" @click="send">发送</button>
         </div>
       </div>
       <p class="composer-hint">Enter 发送 · Shift + Enter 换行 · 对话内容将保存在你的工作空间</p>

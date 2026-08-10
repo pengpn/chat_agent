@@ -62,6 +62,12 @@ func (HeuristicTokenEstimator) EstimateInput(_ string, request provider.ChatRequ
 		tokens += estimateTextTokens(message.Content)
 		tokens += estimateTextTokens(message.ReasoningContent)
 		tokens += estimateTextTokens(message.ToolCallID)
+		for _, part := range message.Parts {
+			tokens += estimateTextTokens(part.Text)
+			if part.Type == "image" {
+				tokens += 1200
+			}
+		}
 		for _, call := range message.ToolCalls {
 			tokens += estimateTextTokens(call.ID) + estimateTextTokens(call.Function.Name) + estimateTextTokens(call.Function.Arguments)
 		}
@@ -108,7 +114,7 @@ func (e *ModelTokenEstimator) EstimateInput(providerID string, request provider.
 	}
 	if tokenizerName == deepSeekV4TokenizerName {
 		if tokens, err := estimateDeepSeekV4Input(request); err == nil {
-			return tokens
+			return tokens + estimateContentParts(request.Messages)
 		}
 		return e.fallback.EstimateInput(providerID, request)
 	}
@@ -126,12 +132,31 @@ func (e *ModelTokenEstimator) EstimateInput(providerID string, request provider.
 	var tokens int64 = 3
 	for _, message := range request.Messages {
 		tokens += 4 + count(message.Content) + count(message.ReasoningContent) + count(message.ToolCallID)
+		for _, part := range message.Parts {
+			tokens += count(part.Text)
+			if part.Type == "image" {
+				tokens += 1200
+			}
+		}
 		for _, call := range message.ToolCalls {
 			tokens += count(call.ID) + count(call.Function.Name) + count(call.Function.Arguments)
 		}
 	}
 	for _, definition := range request.Tools {
 		tokens += 8 + count(definition.Function.Name) + count(definition.Function.Description) + count(string(definition.Function.Parameters))
+	}
+	return tokens
+}
+
+func estimateContentParts(messages []provider.Message) int64 {
+	var tokens int64
+	for _, message := range messages {
+		for _, part := range message.Parts {
+			tokens += estimateTextTokens(part.Text)
+			if part.Type == "image" {
+				tokens += 1200
+			}
+		}
 	}
 	return tokens
 }

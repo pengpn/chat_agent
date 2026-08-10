@@ -1,4 +1,4 @@
-import type { AuthSession, Conversation, CursorPage, Message, ModelProvider, User } from '@/types'
+import type { Attachment, AuthSession, Conversation, CursorPage, Message, ModelProvider, User } from '@/types'
 
 const SESSION_KEY = 'agent-platform.session'
 let token = ''
@@ -34,7 +34,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...options,
     headers: {
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers
     }
@@ -104,6 +104,7 @@ export type ChatPayload = {
   model: string
   temperature?: number
   outputFormat?: string
+	attachmentIds?: string[]
 }
 
 export type RegeneratePayload = Omit<ChatPayload, 'content'>
@@ -335,4 +336,26 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 			reject(new DOMException('Aborted', 'AbortError'))
 		}, { once: true })
 	})
+}
+
+export async function uploadAttachment(conversationID: string, file: File): Promise<Attachment> {
+	const body = new FormData()
+	body.append('file', file)
+	return (await request<{ attachment: Attachment }>(`/api/v1/conversations/${conversationID}/attachments`, { method: 'POST', body })).attachment
+}
+
+export async function retryAttachment(conversationID: string, attachmentID: string): Promise<Attachment> {
+	return (await request<{ attachment: Attachment }>(`/api/v1/conversations/${conversationID}/attachments/${attachmentID}/retry`, { method: 'POST' })).attachment
+}
+
+export async function deleteAttachment(conversationID: string, attachmentID: string): Promise<void> {
+	await request<unknown>(`/api/v1/conversations/${conversationID}/attachments/${attachmentID}`, { method: 'DELETE' })
+}
+
+export async function downloadAttachment(conversationID: string, attachment: Attachment): Promise<void> {
+	const response = await fetch(`/api/v1/conversations/${conversationID}/attachments/${attachment.id}/content`, { headers: { Authorization: `Bearer ${token}` } })
+	if (!response.ok) throw new Error(`下载失败 (${response.status})`)
+	const url = URL.createObjectURL(await response.blob())
+	const anchor = document.createElement('a'); anchor.href = url; anchor.download = attachment.name; anchor.click()
+	URL.revokeObjectURL(url)
 }

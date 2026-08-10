@@ -42,6 +42,7 @@ type Repositories struct {
 	Users         UserRepository
 	Conversations ConversationRepository
 	Messages      MessageRepository
+	Attachments   AttachmentRepository
 }
 
 // ChatRepository groups the persistence operations required for a conversation
@@ -63,6 +64,7 @@ func New(db *gorm.DB) *Repositories {
 		Users:         newUserRepository(db),
 		Conversations: newConversationRepository(db),
 		Messages:      newMessageRepository(db),
+		Attachments:   newAttachmentRepository(db),
 	}
 }
 
@@ -76,6 +78,12 @@ func (r *Repositories) transaction(ctx context.Context, fn func(tx *Repositories
 // the conversation timestamp. It is kept atomic so service code does not need
 // to understand GORM transactions.
 func (r *Repositories) CreateTurn(ctx context.Context, userMessage, assistantMessage *model.Message) error {
+	return r.CreateTurnWithAttachments(ctx, "", nil, userMessage, assistantMessage)
+}
+
+// CreateTurnWithAttachments binds ready, unclaimed attachments in the same
+// transaction that creates the user and assistant messages.
+func (r *Repositories) CreateTurnWithAttachments(ctx context.Context, userID string, attachmentIDs []string, userMessage, assistantMessage *model.Message) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var conversation model.Conversation
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", userMessage.ConversationID).First(&conversation).Error; err != nil {
@@ -101,6 +109,11 @@ func (r *Repositories) CreateTurn(ctx context.Context, userMessage, assistantMes
 		userMessage.IsActiveChild = true
 		if err := tx.Create(userMessage).Error; err != nil {
 			return err
+		}
+		if len(attachmentIDs) > 0 {
+			if err := r.Attachments.ClaimForMessage(ctx, tx, userID, userMessage.ConversationID, userMessage.ID, attachmentIDs); err != nil {
+				return err
+			}
 		}
 		assistantMessage.ParentMessageID = &userMessage.ID
 		assistantMessage.ReplyToMessageID = &userMessage.ID
@@ -157,6 +170,8 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		&model.User{},
 		&model.Conversation{},
 		&model.Message{},
+		&model.Attachment{},
+		&model.AttachmentChunk{},
 		&model.ConversationSummaryVersion{},
 	); err != nil {
 		return err

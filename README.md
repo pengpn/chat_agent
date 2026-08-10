@@ -11,6 +11,7 @@
 - [编辑消息与对话分支实现解析](./docs/message-editing-and-conversation-branches.md)
 - [自动生成对话标题实现解析](./docs/automatic-conversation-title.md)
 - [消息分页与对话搜索实现解析](./docs/message-pagination-and-conversation-search.md)
+- [图片和文件上传实现解析](./docs/image-and-file-attachments.md)
 
 实现思路借鉴了优秀开源项目中经过验证的分层理念：前端会话体验参考 [LibreChat](https://github.com/danny-avila/LibreChat) / [Open WebUI](https://github.com/open-webui/open-webui) 的多 Provider 对话模式；Provider 使用类似 LangChain 的统一消息与流事件接口。这里没有复制它们的代码，而是以更小、更适合学习的 Go 版本重新实现。
 
@@ -20,7 +21,7 @@
 - 一个用户下创建、重命名、删除多个对话
 - PostgreSQL 持久化用户、对话和完整消息历史
 - 同时支持非流式 `Chat` 与 SSE `ChatStream`；流式推送 token 与模型思考增量，前端边接收边渲染
-- OpenAI-compatible 适配器：OpenAI、Kimi、DeepSeek、GLM 复用同一协议实现
+- OpenAI-compatible 适配器：OpenAI、通义千问、Kimi、DeepSeek、GLM 复用同一协议实现
 - Anthropic Messages API 原生 `Chat` / `ChatStream` 适配器
 - 可选主动思考：通过 `ENABLE_THINKING=true` 让受支持的模型返回推理摘要
 - OpenAI-compatible function calling：模型可请求服务端白名单工具，当前内置安全算术 `calculator`
@@ -33,8 +34,9 @@
 - 消息编辑与对话分支：不可变历史、问题分支切换、祖先路径恢复和分支隔离上下文
 - 自动对话标题：首个成功回答后异步生成、失败降级、手动改名保护及独立 Token/成本核算
 - 消息与对话游标分页：最近消息优先、向上加载历史、侧栏增量加载，以及按标题或消息正文搜索
+- 安全附件：MinIO 对象存储、真实 MIME 校验、TXT/PDF/DOCX 提取、图片视觉输入、失败重试和权限绑定
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
-- Docker Compose 一键启动 PostgreSQL
+- Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
 ## 快速启动
 
@@ -43,7 +45,7 @@
 ```bash
 cp .env.example .env
 # 编辑 .env：至少设置 JWT_SECRET，并填入一个模型的 API Key
-docker compose up -d postgres redis
+docker compose up -d
 
 cd backend
 go mod tidy
@@ -81,6 +83,7 @@ backend/
     response/                 # 统一的 code/msg/data JSON 响应包装
   internal/logger/            # Zap 日志封装、Request ID 上下文
   internal/llmgateway/        # 统一模型调用入口：预算、限流、重试、幂等、观测
+  internal/objectstore/       # S3/MinIO 对象存储接口和实现
   internal/provider/          # 供应商协议适配器（仅由 LLMGateway 调用）
   internal/tool/              # 服务端工具定义、白名单与执行实现
 frontend/src/                 # Vue 3 对话 UI
@@ -100,6 +103,10 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 | GET | `/api/v1/events` | 用户级 SSE：后台标题等工作空间事件与断线补发 |
 | GET/POST | `/api/v1/conversations` | 游标分页/搜索对话列表；新建对话 |
 | PATCH/DELETE | `/api/v1/conversations/:id` | 重命名 / 删除对话 |
+| POST | `/api/v1/conversations/:id/attachments` | multipart 上传并解析附件 |
+| POST | `/api/v1/conversations/:id/attachments/:attachmentId/retry` | 重试失败的文档解析 |
+| GET | `/api/v1/conversations/:id/attachments/:attachmentId/content` | 鉴权下载附件 |
+| DELETE | `/api/v1/conversations/:id/attachments/:attachmentId` | 移除尚未发送的附件 |
 | GET | `/api/v1/conversations/:id/messages` | 倒序游标分页获取消息历史 |
 | POST | `/api/v1/conversations/:id/messages` | SSE 流式发送消息 |
 | POST | `/api/v1/conversations/:id/messages/chat` | 非流式发送消息，返回完整结果 |
@@ -187,7 +194,7 @@ GET /api/v1/conversations/:id/messages?limit=50&cursor=<nextCursor>
 
 两个响应都会返回 `nextCursor` 和 `hasMore`。`limit` 允许 `1..100`，非法或损坏的游标返回 `400`。搜索 SQL 始终包含当前 `user_id` 条件，再匹配标题或消息内容，防止通过关键词看到其他用户的对话。PostgreSQL 使用用户/更新时间、会话/消息时间的复合 B-tree 索引，以及标题和正文的 `pg_trgm` GIN 索引。
 
-非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature` 和 `outputFormat`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
+非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature`、`outputFormat` 和 `attachmentIds`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 
 ## JSON Schema 结构化输出
 

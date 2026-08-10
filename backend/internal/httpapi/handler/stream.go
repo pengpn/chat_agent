@@ -228,11 +228,12 @@ func (h *Handler) ChatMessage(c *gin.Context) {
 
 func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool) {
 	var input struct {
-		Content      string   `json:"content"`
-		Provider     string   `json:"provider"`
-		Model        string   `json:"model"`
-		Temperature  *float64 `json:"temperature"`
-		OutputFormat string   `json:"outputFormat"`
+		Content       string   `json:"content"`
+		Provider      string   `json:"provider"`
+		Model         string   `json:"model"`
+		Temperature   *float64 `json:"temperature"`
+		OutputFormat  string   `json:"outputFormat"`
+		AttachmentIDs []string `json:"attachmentIds"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
@@ -244,6 +245,7 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		Model:          input.Model,
 		Temperature:    input.Temperature,
 		OutputFormat:   input.OutputFormat,
+		AttachmentIDs:  input.AttachmentIDs,
 		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 	})
 	return session, h.handlePrepareError(c, err)
@@ -272,6 +274,16 @@ func (h *Handler) handlePrepareError(c *gin.Context, err error) bool {
 		response.WriteErrorResp(c, http.StatusConflict, "当前回答不能重新生成")
 	case errors.Is(err, service.ErrMessageNotEditable):
 		response.WriteErrorResp(c, http.StatusConflict, "当前消息不能编辑")
+	case errors.Is(err, service.ErrTooManyAttachments):
+		response.WriteErrorResp(c, http.StatusBadRequest, "单条消息的附件数量超过限制")
+	case errors.Is(err, service.ErrAttachmentNotFound):
+		response.WriteErrorResp(c, http.StatusNotFound, "附件不存在或无权访问")
+	case errors.Is(err, service.ErrAttachmentNotReady):
+		response.WriteErrorResp(c, http.StatusConflict, "附件尚未解析完成，请稍后重试")
+	case errors.Is(err, service.ErrAttachmentAlreadyUsed):
+		response.WriteErrorResp(c, http.StatusConflict, "附件已经用于其他消息")
+	case errors.Is(err, service.ErrModelDoesNotSupportVision):
+		response.WriteErrorResp(c, http.StatusBadRequest, "当前模型不支持图片输入，请切换视觉模型")
 	case errors.Is(err, llmgateway.ErrIdempotencyInProgress):
 		response.WriteErrorResp(c, http.StatusConflict, "相同消息正在处理，请等待本次请求完成")
 	case errors.Is(err, llmgateway.ErrIdempotencyCompleted):
