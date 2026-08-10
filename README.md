@@ -12,6 +12,8 @@
 - [自动生成对话标题实现解析](./docs/automatic-conversation-title.md)
 - [消息分页与对话搜索实现解析](./docs/message-pagination-and-conversation-search.md)
 - [图片和文件上传实现解析](./docs/image-and-file-attachments.md)
+- [前端设计系统](./design-system/agent-workspace/MASTER.md)
+- [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
 实现思路借鉴了优秀开源项目中经过验证的分层理念：前端会话体验参考 [LibreChat](https://github.com/danny-avila/LibreChat) / [Open WebUI](https://github.com/open-webui/open-webui) 的多 Provider 对话模式；Provider 使用类似 LangChain 的统一消息与流事件接口。这里没有复制它们的代码，而是以更小、更适合学习的 Go 版本重新实现。
 

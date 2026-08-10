@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { deleteAttachment, downloadAttachment, retryAttachment, uploadAttachment } from '@/lib/api'
 import { shouldSendComposerMessage } from '@/lib/composer-keyboard'
@@ -41,11 +41,14 @@ const uploading = ref(0)
 const attachmentError = ref('')
 const draggingFiles = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+const modelPicker = ref<HTMLElement | null>(null)
+const modelPickerOpen = ref(false)
 
 const models = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.models ?? [])
 const providerLabel = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.label ?? '选择模型')
 const displayMessages = computed(() => buildDisplayMessages(props.messages))
 const selectedProviderConfig = computed(() => props.providers.find((item) => item.id === selectedProvider.value))
+const selectedModelSupportsVision = computed(() => selectedProviderConfig.value?.visionModels?.includes(selectedModel.value) ?? false)
 const hasImageAttachment = computed(() => attachments.value.some((item) => item.kind === 'image'))
 const visionUnsupported = computed(() => hasImageAttachment.value && !selectedProviderConfig.value?.visionModels?.includes(selectedModel.value))
 const attachmentBlocked = computed(() => uploading.value > 0 || attachments.value.some((item) => item.status !== 'ready') || visionUnsupported.value)
@@ -57,6 +60,9 @@ watch(() => props.providers, (providers) => {
 watch(models, (items) => {
   if (!items.includes(selectedModel.value)) selectedModel.value = items[0] || ''
 }, { immediate: true })
+watch(() => props.pending, (pending) => {
+  if (pending) modelPickerOpen.value = false
+})
 watch(() => props.messages.map((item) => `${item.content}\u0000${item.think ?? ''}`).join('\u0001'), async () => {
   if (!followLatestMessage.value) return
   await nextTick()
@@ -69,6 +75,24 @@ function onViewportScroll() {
   followLatestMessage.value = isNearScrollBottom(element)
   if (element.scrollTop <= 80) requestOlderMessages()
 }
+
+function toggleModelPicker() {
+  if (props.pending || !props.providers.length) return
+  modelPickerOpen.value = !modelPickerOpen.value
+}
+
+function chooseModel(provider: ModelProvider, model: string) {
+  selectedProvider.value = provider.id
+  selectedModel.value = model
+  modelPickerOpen.value = false
+}
+
+function closeModelPickerOnOutsideClick(event: PointerEvent) {
+  if (!modelPicker.value?.contains(event.target as Node)) modelPickerOpen.value = false
+}
+
+onMounted(() => document.addEventListener('pointerdown', closeModelPickerOnOutsideClick))
+onBeforeUnmount(() => document.removeEventListener('pointerdown', closeModelPickerOnOutsideClick))
 
 function requestOlderMessages() {
   const element = viewport.value
@@ -317,13 +341,43 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
 			<button class="attach-button" type="button" :disabled="!conversation || pending || attachments.length >= 5" aria-label="添加图片或文件" title="添加图片或文件" @click="fileInput?.click()">
 				<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
 			</button>
-		  <div class="model-selects">
-            <select v-model="selectedProvider" :disabled="pending || !providers.length" aria-label="Provider">
-              <option v-for="provider in providers" :key="provider.id" :value="provider.id">{{ provider.label }}</option>
-            </select>
-            <select v-model="selectedModel" :disabled="pending || !models.length" aria-label="模型">
-              <option v-for="model in models" :key="model" :value="model">{{ model }}{{ selectedProviderConfig?.visionModels?.includes(model) ? ' · 视觉' : '' }}</option>
-            </select>
+		  <div ref="modelPicker" class="model-picker" @keydown.esc="modelPickerOpen = false">
+			<button
+			  class="model-picker-trigger"
+			  type="button"
+			  :disabled="pending || !providers.length"
+			  aria-haspopup="listbox"
+			  :aria-expanded="modelPickerOpen"
+			  aria-label="切换模型"
+			  @click="toggleModelPicker"
+			>
+			  <span class="model-picker-mark" aria-hidden="true"><span /></span>
+			  <span class="model-picker-current">
+				<small>{{ providerLabel }}</small>
+				<strong>{{ selectedModel || '选择模型' }}</strong>
+			  </span>
+			  <span v-if="selectedModelSupportsVision" class="model-capability">视觉</span>
+			  <svg class="model-picker-chevron" :class="{ open: modelPickerOpen }" aria-hidden="true" viewBox="0 0 20 20"><path d="m6 8 4 4 4-4" /></svg>
+			</button>
+			<div v-if="modelPickerOpen" class="model-picker-menu" role="listbox" aria-label="可用模型">
+			  <div class="model-picker-heading"><strong>选择模型</strong><span>{{ providers.length }} 个供应商</span></div>
+			  <div v-for="provider in providers" :key="provider.id" class="model-provider-group" role="group" :aria-label="provider.label">
+				<p>{{ provider.label }}</p>
+				<button
+				  v-for="model in provider.models"
+				  :key="`${provider.id}:${model}`"
+				  type="button"
+				  role="option"
+				  :aria-selected="provider.id === selectedProvider && model === selectedModel"
+				  :class="{ selected: provider.id === selectedProvider && model === selectedModel }"
+				  @click="chooseModel(provider, model)"
+				>
+				  <span class="model-option-check" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" /></svg></span>
+				  <span class="model-option-copy"><strong>{{ model }}</strong><small>{{ provider.label }}</small></span>
+				  <span v-if="provider.visionModels?.includes(model)" class="model-capability">视觉</span>
+				</button>
+			  </div>
+			</div>
 		  </div></div>
           <button v-if="pending" class="stop-button" @click="emit('stop')"><span />停止生成</button>
           <button v-else class="send-button" :disabled="(!draft.trim() && !attachments.length) || attachmentBlocked || !conversation || !selectedModel" @click="send">发送</button>

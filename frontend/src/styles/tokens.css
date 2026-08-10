@@ -1,0 +1,101 @@
+:root {
+  /* Typography */
+  --font-sans: "Plus Jakarta Sans", "Noto Sans SC", sans-serif;
+  --font-content: "Noto Sans SC", "Plus Jakarta Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+
+  --font-size-2xs: 9px;
+  --font-size-xs: 10px;
+  --font-size-sm: 11px;
+  --font-size-label: 12px;
+  --font-size-body-sm: 13px;
+  --font-size-body: 14px;
+  --font-size-body-lg: 15px;
+  --font-size-input-mobile: 16px;
+  --font-size-title: 18px;
+  --font-size-display-sm: 28px;
+
+  /* Core surfaces and text */
+  --color-canvas: #f4f5f2;
+  --color-workspace: #f7f8f5;
+  --color-surface: #fbfcfa;
+  --color-surface-raised: #ffffff;
+  --color-surface-muted: #f3f7f5;
+  --color-surface-selected: #eaf4f0;
+  --color-text-primary: #1e2927;
+  --color-text-secondary: #53635d;
+  --color-text-muted: #64736e;
+  --color-text-subtle: #81908b;
+  --color-border: #d6deda;
+  --color-border-subtle: #e8eeeb;
+  --color-border-strong: #b9c9c2;
+
+  /* Brand and interaction */
+  --color-primary: #0f766e;
+  --color-primary-hover: #0b625c;
+  --color-primary-active: #084d48;
+  --color-primary-soft: #eaf5f1;
+  --color-primary-soft-hover: #dcece5;
+  --color-on-primary: #ffffff;
+  --color-focus-ring: #0f766e;
+
+  /* Sidebar */
+  --color-sidebar: #17211f;
+  --color-sidebar-surface: #22312d;
+  --color-sidebar-surface-hover: #293a35;
+  --color-sidebar-border: #31413d;
+  --color-sidebar-text: #eff4f1;
+  --color-sidebar-text-muted: #adbfba;
+
+  /* Feedback */
+  --color-danger: #a13b46;
+  --color-danger-surface: #fff0f1;
+  --color-danger-border: #e6bdc2;
+  --color-warning: #765b12;
+  --color-warning-surface: #fff8d8;
+  --color-success: #245f58;
+  --color-success-surface: #eaf5f1;
+
+  /* Spacing: 4px base rhythm */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Shape */
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
+
+  /* Elevation and focus */
+  --shadow-surface: 0 7px 20px rgb(38 52 46 / 4%);
+  --shadow-dropdown: 0 16px 40px rgb(35 52 46 / 14%), 0 2px 8px rgb(35 52 46 / 7%);
+  --shadow-focus: 0 0 0 3px rgb(15 118 110 / 8%);
+
+  /* Motion */
+  --duration-fast: 160ms;
+  --duration-normal: 180ms;
+  --duration-slow: 240ms;
+  --ease-standard: ease;
+  --ease-enter: ease-out;
+  --ease-exit: ease-in;
+
+  /* Layout and layering */
+  --sidebar-width: 272px;
+  --content-max-width: 850px;
+  --touch-target: 44px;
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-dropdown: 40;
+  --z-modal: 100;
+  --z-toast: 200;
+}
