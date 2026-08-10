@@ -1,4 +1,4 @@
-import type { AuthSession, Conversation, Message, ModelProvider, User } from '@/types'
+import type { AuthSession, Conversation, CursorPage, Message, ModelProvider, User } from '@/types'
 
 const SESSION_KEY = 'agent-platform.session'
 let token = ''
@@ -67,8 +67,14 @@ export async function listProviders(): Promise<ModelProvider[]> {
   return (await request<{ providers: ModelProvider[] }>('/api/v1/models')).providers
 }
 
-export async function listConversations(): Promise<Conversation[]> {
-  return (await request<{ conversations: Conversation[] }>('/api/v1/conversations')).conversations
+export async function listConversations(options: { cursor?: string; query?: string; limit?: number } = {}): Promise<CursorPage<Conversation>> {
+  const params = new URLSearchParams()
+  if (options.cursor) params.set('cursor', options.cursor)
+  if (options.query) params.set('q', options.query)
+  if (options.limit) params.set('limit', String(options.limit))
+  const suffix = params.size ? `?${params}` : ''
+  const page = await request<{ conversations: Conversation[]; nextCursor: string; hasMore: boolean }>(`/api/v1/conversations${suffix}`)
+  return { items: page.conversations, nextCursor: page.nextCursor, hasMore: page.hasMore }
 }
 
 export async function createConversation(title = ''): Promise<Conversation> {
@@ -83,8 +89,13 @@ export async function deleteConversation(id: string): Promise<void> {
   await request<unknown>(`/api/v1/conversations/${id}`, { method: 'DELETE' })
 }
 
-export async function listMessages(conversationID: string): Promise<Message[]> {
-  return (await request<{ messages: Message[] }>(`/api/v1/conversations/${conversationID}/messages`)).messages
+export async function listMessages(conversationID: string, cursor = '', limit?: number): Promise<CursorPage<Message>> {
+  const params = new URLSearchParams()
+  if (cursor) params.set('cursor', cursor)
+  if (limit) params.set('limit', String(limit))
+  const suffix = params.size ? `?${params}` : ''
+  const page = await request<{ messages: Message[]; nextCursor: string; hasMore: boolean }>(`/api/v1/conversations/${conversationID}/messages${suffix}`)
+  return { items: page.messages, nextCursor: page.nextCursor, hasMore: page.hasMore }
 }
 
 export type ChatPayload = {

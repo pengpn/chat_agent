@@ -3,10 +3,12 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
+	"github.com/example/agent-platform/backend/internal/pagination"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -16,6 +18,7 @@ import (
 type ConversationRepository interface {
 	Create(ctx context.Context, conversation *model.Conversation) error
 	ListByUserID(ctx context.Context, userID string) ([]model.Conversation, error)
+	ListPageByUserID(ctx context.Context, userID string, query ConversationPageQuery) ([]model.Conversation, error)
 	FindByIDForUser(ctx context.Context, userID, id string) (model.Conversation, error)
 	UpdateTitle(ctx context.Context, userID, id, title string) (model.Conversation, error)
 	ClaimTitleGeneration(ctx context.Context, userID, id string, staleBefore time.Time) (TitleGenerationClaim, bool, error)
@@ -23,6 +26,12 @@ type ConversationRepository interface {
 	Delete(ctx context.Context, userID, id string) error
 	Touch(ctx context.Context, id string) error
 	SaveSummaryVersion(ctx context.Context, userID string, version *model.ConversationSummaryVersion, activate bool) error
+}
+
+type ConversationPageQuery struct {
+	Cursor *pagination.Cursor
+	Limit  int
+	Search string
 }
 
 type TitleGenerationClaim struct {
@@ -61,6 +70,33 @@ func (r *GormConversationRepository) ListByUserID(ctx context.Context, userID st
 		Order("updated_at DESC").
 		Find(&items).Error
 	return items, err
+}
+
+// ListPageByUserID returns limit+1 rows so the service can determine whether a
+// next page exists without issuing a separate COUNT query. Search remains
+// scoped by conversations.user_id even when matching message content.
+func (r *GormConversationRepository) ListPageByUserID(ctx context.Context, userID string, page ConversationPageQuery) ([]model.Conversation, error) {
+	items := make([]model.Conversation, 0, page.Limit+1)
+	query := r.db.WithContext(ctx).Model(&model.Conversation{}).
+		Where("conversations.user_id = ?", userID)
+	if search := strings.TrimSpace(page.Search); search != "" {
+		pattern := "%" + escapeLike(search) + "%"
+		query = query.Where(`conversations.title ILIKE ? ESCAPE '\' OR EXISTS (
+			SELECT 1 FROM messages
+			WHERE messages.conversation_id = conversations.id
+				AND messages.content ILIKE ? ESCAPE '\'
+		)`, pattern, pattern)
+	}
+	if page.Cursor != nil {
+		query = query.Where("(conversations.updated_at, conversations.id) < (?, ?)", page.Cursor.Time, page.Cursor.ID)
+	}
+	err := query.Order("conversations.updated_at DESC, conversations.id DESC").Limit(page.Limit + 1).Find(&items).Error
+	return items, err
+}
+
+func escapeLike(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
 }
 
 func (r *GormConversationRepository) FindByIDForUser(ctx context.Context, userID, id string) (model.Conversation, error) {

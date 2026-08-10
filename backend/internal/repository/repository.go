@@ -150,6 +150,9 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 	if err := db.WithContext(ctx).Exec("CREATE EXTENSION IF NOT EXISTS pgcrypto").Error; err != nil {
 		return err
 	}
+	if err := db.WithContext(ctx).Exec("CREATE EXTENSION IF NOT EXISTS pg_trgm").Error; err != nil {
+		return err
+	}
 	if err := db.WithContext(ctx).AutoMigrate(
 		&model.User{},
 		&model.Conversation{},
@@ -159,6 +162,9 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	if err := migrateMessageTree(ctx, db); err != nil {
+		return err
+	}
+	if err := ensurePaginationAndSearchIndexes(ctx, db); err != nil {
 		return err
 	}
 	// Titles created by older versions came either from the user or from the
@@ -180,6 +186,19 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		ALTER TABLE conversations DROP CONSTRAINT IF EXISTS conversations_title_status_check;
 		ALTER TABLE conversations ADD CONSTRAINT conversations_title_status_check
 		CHECK (title_status IN ('default', 'generating', 'generated', 'fallback', 'manual'))
+	`).Error
+}
+
+func ensurePaginationAndSearchIndexes(ctx context.Context, db *gorm.DB) error {
+	return db.WithContext(ctx).Exec(`
+		CREATE INDEX IF NOT EXISTS conversations_user_updated_cursor_idx
+		ON conversations (user_id, updated_at DESC, id DESC);
+		CREATE INDEX IF NOT EXISTS messages_conversation_created_cursor_idx
+		ON messages (conversation_id, created_at DESC, id DESC);
+		CREATE INDEX IF NOT EXISTS conversations_title_trgm_idx
+		ON conversations USING GIN (title gin_trgm_ops);
+		CREATE INDEX IF NOT EXISTS messages_content_trgm_idx
+		ON messages USING GIN (content gin_trgm_ops)
 	`).Error
 }
 

@@ -10,6 +10,7 @@
 - [重新生成回答实现解析](./docs/regenerate-answer.md)
 - [编辑消息与对话分支实现解析](./docs/message-editing-and-conversation-branches.md)
 - [自动生成对话标题实现解析](./docs/automatic-conversation-title.md)
+- [消息分页与对话搜索实现解析](./docs/message-pagination-and-conversation-search.md)
 
 实现思路借鉴了优秀开源项目中经过验证的分层理念：前端会话体验参考 [LibreChat](https://github.com/danny-avila/LibreChat) / [Open WebUI](https://github.com/open-webui/open-webui) 的多 Provider 对话模式；Provider 使用类似 LangChain 的统一消息与流事件接口。这里没有复制它们的代码，而是以更小、更适合学习的 Go 版本重新实现。
 
@@ -31,6 +32,7 @@
 - 回答重新生成：复用原问题上下文、保留多个回答版本、版本切换、停止生成和幂等防重
 - 消息编辑与对话分支：不可变历史、问题分支切换、祖先路径恢复和分支隔离上下文
 - 自动对话标题：首个成功回答后异步生成、失败降级、手动改名保护及独立 Token/成本核算
+- 消息与对话游标分页：最近消息优先、向上加载历史、侧栏增量加载，以及按标题或消息正文搜索
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL
 
@@ -96,9 +98,9 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 | POST | `/api/v1/auth/login` | 登录 |
 | GET | `/api/v1/models` | 已配置、可用的 Provider / 模型 |
 | GET | `/api/v1/events` | 用户级 SSE：后台标题等工作空间事件与断线补发 |
-| GET/POST | `/api/v1/conversations` | 对话列表 / 新建对话 |
+| GET/POST | `/api/v1/conversations` | 游标分页/搜索对话列表；新建对话 |
 | PATCH/DELETE | `/api/v1/conversations/:id` | 重命名 / 删除对话 |
-| GET | `/api/v1/conversations/:id/messages` | 获取消息历史 |
+| GET | `/api/v1/conversations/:id/messages` | 倒序游标分页获取消息历史 |
 | POST | `/api/v1/conversations/:id/messages` | SSE 流式发送消息 |
 | POST | `/api/v1/conversations/:id/messages/chat` | 非流式发送消息，返回完整结果 |
 | POST | `/api/v1/conversations/:id/messages/:messageId/regenerate` | SSE 重新生成指定 assistant 回答并创建新版本 |
@@ -166,6 +168,24 @@ OPENAI_MODEL_LIMITS=gpt-4o-mini:32768:4096
 手动重命名会把标题状态设为 `manual`，正在执行的后台模型结果不能覆盖它。标题调用使用独立的 `purpose=conversation_title` 观测，并在会话表记录 Provider、模型、Token 和成本。`TITLE_GENERATION_MAX_TOKENS`、`TITLE_GENERATION_MAX_LENGTH` 和 `TITLE_GENERATION_TIMEOUT` 分别控制输出预留、最终字符数和任务超时。
 
 浏览器登录后维持 `/api/v1/events` 用户级 SSE。标题保存后服务端推送 `conversation.title.updated`，不再轮询会话列表；事件携带递增 `sequence`，`USER_EVENT_TTL` 和 `USER_EVENT_MAX_EVENTS` 控制断线补发窗口。缓存缺口或服务重启时，前端重新加载会话列表后从新序列继续订阅。
+
+## 消息分页与对话搜索
+
+对话和消息列表均使用不透明游标，不使用数据量增大后越来越慢且容易产生跳页的 `OFFSET`。游标内部使用排序时间和 UUID 作为稳定断点；客户端只负责原样回传，不能依赖其内部结构。
+
+对话列表默认每页 30 条，支持 `q` 同时搜索标题和消息正文：
+
+```http
+GET /api/v1/conversations?limit=30&q=Agent&cursor=<nextCursor>
+```
+
+消息列表默认每页 50 条，服务端按最新到最早返回。前端首次只渲染最近一页，向上滚动或点击“加载更早消息”时继续请求；新页面合并后会补偿 `scrollHeight` 差值，避免阅读位置跳动。
+
+```http
+GET /api/v1/conversations/:id/messages?limit=50&cursor=<nextCursor>
+```
+
+两个响应都会返回 `nextCursor` 和 `hasMore`。`limit` 允许 `1..100`，非法或损坏的游标返回 `400`。搜索 SQL 始终包含当前 `user_id` 条件，再匹配标题或消息内容，防止通过关键词看到其他用户的对话。PostgreSQL 使用用户/更新时间、会话/消息时间的复合 B-tree 索引，以及标题和正文的 `pg_trgm` GIN 索引。
 
 非流式接口使用相同请求体（`content`、`provider`、`model`、可选 `temperature` 和 `outputFormat`），等待模型完整返回后返回 `userMessage` 与 `assistantMessage`。最终消息的 `content` 是回答，`think` 是模型返回的推理内容；不是所有模型或模型配置都会返回 `think`。无论使用哪一种接口，服务端都会执行相同的工具调用循环并记录 token/成本。
 

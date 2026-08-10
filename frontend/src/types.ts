@@ -45,3 +45,9 @@ export interface ModelProvider {
   label: string
   models: string[]
 }
+
+export interface CursorPage<T> {
+  items: T[]
+  nextCursor: string
+  hasMore: boolean
+}

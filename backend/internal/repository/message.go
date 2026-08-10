@@ -6,6 +6,7 @@ import (
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
+	"github.com/example/agent-platform/backend/internal/pagination"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -14,6 +15,7 @@ import (
 // services.
 type MessageRepository interface {
 	ListByConversationForUser(ctx context.Context, userID, conversationID string) ([]model.Message, error)
+	ListPageByConversationForUser(ctx context.Context, userID, conversationID string, cursor *pagination.Cursor, limit int) ([]model.Message, error)
 	FindByIDForUser(ctx context.Context, userID, conversationID, messageID string) (model.Message, error)
 	Create(ctx context.Context, message *model.Message) error
 	Finalize(ctx context.Context, id string, completion model.MessageCompletion) (model.Message, error)
@@ -37,6 +39,23 @@ func (r *GormMessageRepository) ListByConversationForUser(ctx context.Context, u
 		Where("messages.conversation_id = ? AND conversations.user_id = ?", conversationID, userID).
 		Order("messages.created_at ASC").
 		Find(&items).Error
+	return items, err
+}
+
+// ListPageByConversationForUser queries newest-first with a stable
+// (created_at, id) cursor. The user constraint is part of the same SQL query so
+// another user's conversation can never be paged by guessing its UUID.
+func (r *GormMessageRepository) ListPageByConversationForUser(ctx context.Context, userID, conversationID string, cursor *pagination.Cursor, limit int) ([]model.Message, error) {
+	items := make([]model.Message, 0, limit+1)
+	query := r.db.WithContext(ctx).
+		Model(&model.Message{}).
+		Select("messages.*").
+		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
+		Where("messages.conversation_id = ? AND conversations.user_id = ?", conversationID, userID)
+	if cursor != nil {
+		query = query.Where("(messages.created_at, messages.id) < (?, ?)", cursor.Time, cursor.ID)
+	}
+	err := query.Order("messages.created_at DESC, messages.id DESC").Limit(limit + 1).Find(&items).Error
 	return items, err
 }
 

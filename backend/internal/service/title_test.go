@@ -184,6 +184,10 @@ func (*titleTestRepository) Create(context.Context, *model.Conversation) error {
 func (*titleTestRepository) ListByUserID(context.Context, string) ([]model.Conversation, error) {
 	return nil, nil
 }
+
+func (*titleTestRepository) ListPageByUserID(context.Context, string, repository.ConversationPageQuery) ([]model.Conversation, error) {
+	return nil, nil
+}
 func (*titleTestRepository) FindByIDForUser(context.Context, string, string) (model.Conversation, error) {
 	return model.Conversation{}, nil
 }

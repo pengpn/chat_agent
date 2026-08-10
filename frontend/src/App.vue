@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowReactive } 
 import AuthPanel from '@/components/AuthPanel.vue'
 import ChatPanel from '@/components/ChatPanel.vue'
 import ConversationSidebar from '@/components/ConversationSidebar.vue'
+import { mergeConversations, mergeMessages, sortMessagesAscending } from '@/lib/list-pagination'
 import {
   activateBranch,
   clearSession,
@@ -26,8 +27,18 @@ import type { AuthSession, Conversation, Message, ModelProvider, User } from '@/
 const initialSession = restoreSession()
 const user = ref<User | null>(initialSession?.user ?? null)
 const conversations = ref<Conversation[]>([])
+const conversationCursor = ref('')
+const conversationsHaveMore = ref(false)
+const conversationsLoadingMore = ref(false)
+const conversationsSearching = ref(false)
+const conversationSearch = ref('')
 const activeID = ref<string | null>(null)
+const activeConversationSnapshot = ref<Conversation | null>(null)
 const messages = ref<Message[]>([])
+const messageCursor = ref('')
+const messagesHaveMore = ref(false)
+const messagesLoadingOlder = ref(false)
+const messagesLoading = ref(false)
 const providers = ref<ModelProvider[]>([])
 const booting = ref(Boolean(initialSession))
 const error = ref('')
@@ -35,8 +46,11 @@ const streamNotice = ref('')
 const streamControllers = shallowReactive(new Map<string, AbortController>())
 const liveTurns = reactive(new Map<string, { userMessage: Message; assistantMessage: Message }>())
 let userEventsController: AbortController | null = null
+let conversationRequestVersion = 0
+let messageRequestVersion = 0
 
-const activeConversation = computed(() => conversations.value.find((item) => item.id === activeID.value) ?? null)
+const activeConversation = computed(() => conversations.value.find((item) => item.id === activeID.value)
+  ?? (activeConversationSnapshot.value?.id === activeID.value ? activeConversationSnapshot.value : null))
 const pending = computed(() => Boolean(activeID.value && streamControllers.has(activeID.value)))
 
 onMounted(async () => {
@@ -71,31 +85,114 @@ async function authenticated(session: AuthSession) {
 
 async function loadWorkspace() {
   error.value = ''
-  const [conversationItems, providerItems] = await Promise.all([listConversations(), listProviders()])
-  conversations.value = conversationItems
+  conversationSearch.value = ''
+  const [conversationPage, providerItems] = await Promise.all([listConversations(), listProviders()])
+  conversations.value = conversationPage.items
+  conversationCursor.value = conversationPage.nextCursor
+  conversationsHaveMore.value = conversationPage.hasMore
   providers.value = providerItems
-  if (conversationItems.length) await selectConversation(conversationItems[0].id)
+  if (conversationPage.items.length) await selectConversation(conversationPage.items[0].id)
 }
 
 async function createNewConversation() {
   try {
     const conversation = await createConversation()
-    conversations.value = [conversation, ...conversations.value]
+    conversationSearch.value = ''
+    const page = await listConversations()
+    conversations.value = page.items
+    conversationCursor.value = page.nextCursor
+    conversationsHaveMore.value = page.hasMore
     activeID.value = conversation.id
+    activeConversationSnapshot.value = conversation
     messages.value = []
+    messageCursor.value = ''
+    messagesHaveMore.value = false
+    messagesLoading.value = false
   } catch (cause) {
     error.value = messageFor(cause)
   }
 }
 
 async function selectConversation(id: string) {
+  const requestVersion = ++messageRequestVersion
   activeID.value = id
+  activeConversationSnapshot.value = conversations.value.find((item) => item.id === id) ?? activeConversationSnapshot.value
   error.value = ''
 	streamNotice.value = ''
+  messagesLoadingOlder.value = false
+  messagesLoading.value = true
+  messages.value = mergeLiveTurn([], id)
+  messageCursor.value = ''
+  messagesHaveMore.value = false
   try {
-	  messages.value = mergeLiveTurn(await listMessages(id), id)
+	  const page = await listMessages(id)
+	  if (activeID.value !== id || requestVersion !== messageRequestVersion) return
+	  messages.value = mergeLiveTurn(sortMessagesAscending(page.items), id)
+	  messageCursor.value = page.nextCursor
+	  messagesHaveMore.value = page.hasMore
+  } catch (cause) {
+    if (activeID.value === id && requestVersion === messageRequestVersion) error.value = messageFor(cause)
+  } finally {
+    if (activeID.value === id && requestVersion === messageRequestVersion) messagesLoading.value = false
+  }
+}
+
+async function searchConversations(query: string) {
+  const normalized = query.trim()
+  conversationSearch.value = normalized
+  const requestVersion = ++conversationRequestVersion
+  conversationsSearching.value = true
+  try {
+    const page = await listConversations({ query: normalized })
+    if (requestVersion !== conversationRequestVersion || conversationSearch.value !== normalized) return
+    conversations.value = page.items
+    conversationCursor.value = page.nextCursor
+    conversationsHaveMore.value = page.hasMore
+  } catch (cause) {
+    if (requestVersion === conversationRequestVersion) error.value = messageFor(cause)
+  } finally {
+    if (requestVersion === conversationRequestVersion) conversationsSearching.value = false
+  }
+}
+
+async function loadMoreConversations() {
+  if (conversationsLoadingMore.value || !conversationsHaveMore.value || !conversationCursor.value) return
+  conversationsLoadingMore.value = true
+  const cursor = conversationCursor.value
+  const query = conversationSearch.value
+  try {
+    const page = await listConversations({ cursor, query })
+    if (query !== conversationSearch.value) return
+    conversations.value = mergeConversations(conversations.value, page.items)
+    conversationCursor.value = page.nextCursor
+    conversationsHaveMore.value = page.hasMore
   } catch (cause) {
     error.value = messageFor(cause)
+  } finally {
+    conversationsLoadingMore.value = false
+  }
+}
+
+async function loadOlderMessages(done: () => void) {
+  const conversationID = activeID.value
+  if (!conversationID || messagesLoadingOlder.value || !messagesHaveMore.value || !messageCursor.value) {
+    done()
+    return
+  }
+  messagesLoadingOlder.value = true
+  const requestVersion = messageRequestVersion
+  const cursor = messageCursor.value
+  try {
+    const page = await listMessages(conversationID, cursor)
+    if (activeID.value !== conversationID) return
+    messages.value = mergeMessages(sortMessagesAscending(page.items), messages.value)
+    messageCursor.value = page.nextCursor
+    messagesHaveMore.value = page.hasMore
+  } catch (cause) {
+    if (activeID.value === conversationID) error.value = messageFor(cause)
+  } finally {
+    if (activeID.value === conversationID && requestVersion === messageRequestVersion) messagesLoadingOlder.value = false
+    done()
   }
 }
 
@@ -103,6 +200,7 @@ async function updateTitle(conversation: Conversation, done?: (success: boolean,
   try {
     const updated = await renameConversation(conversation.id, conversation.title)
     conversations.value = conversations.value.map((item) => item.id === updated.id ? updated : item)
+    if (activeID.value === updated.id) activeConversationSnapshot.value = updated
     done?.(true)
   } catch (cause) {
     const message = messageFor(cause)
@@ -118,7 +216,10 @@ async function removeConversation(conversation: Conversation) {
     conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
     if (activeID.value === conversation.id) {
       activeID.value = conversations.value[0]?.id ?? null
+      activeConversationSnapshot.value = conversations.value[0] ?? null
       messages.value = []
+      messageCursor.value = ''
+      messagesHaveMore.value = false
       if (activeID.value) await selectConversation(activeID.value)
     }
   } catch (cause) {
@@ -290,7 +391,7 @@ function mergeLiveTurn(items: Message[], conversationID: string): Message[] {
 	for (const message of [turn.userMessage, turn.assistantMessage]) {
 		if (!merged.some((item) => item.id === message.id)) merged.push(message)
 	}
-	return merged.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+	return sortMessagesAscending(merged)
 }
 
 function startUserEvents() {
@@ -299,13 +400,21 @@ function startUserEvents() {
 	userEventsController = controller
 	void subscribeUserEvents({
 		onConversationTitleUpdated(conversation) {
+			if (activeID.value === conversation.id) activeConversationSnapshot.value = conversation
+			if (conversationSearch.value) {
+				void searchConversations(conversationSearch.value)
+				return
+			}
 			conversations.value = conversations.value
 				.map((item) => item.id === conversation.id ? conversation : item)
 				.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 		},
 		async onReset() {
 			if (!user.value) return
-			conversations.value = await listConversations()
+			const page = await listConversations({ query: conversationSearch.value })
+			conversations.value = page.items
+			conversationCursor.value = page.nextCursor
+			conversationsHaveMore.value = page.hasMore
 		}
 	}, controller.signal).catch((cause) => {
 		if (!controller.signal.aborted) error.value = messageFor(cause)
@@ -326,8 +435,16 @@ function logout() {
   clearSession()
   user.value = null
   conversations.value = []
+  conversationCursor.value = ''
+  conversationsHaveMore.value = false
+  conversationsSearching.value = false
+  conversationSearch.value = ''
   activeID.value = null
+  activeConversationSnapshot.value = null
   messages.value = []
+  messageCursor.value = ''
+  messagesHaveMore.value = false
+  messagesLoading.value = false
   providers.value = []
   error.value = ''
   streamNotice.value = ''
@@ -350,10 +467,16 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       :conversations="conversations"
       :active-i-d="activeID"
       :user="user"
+      :has-more="conversationsHaveMore"
+      :loading-more="conversationsLoadingMore"
+      :searching="conversationsSearching"
+      :search-query="conversationSearch"
       @create="createNewConversation"
       @select="selectConversation"
       @rename="updateTitle"
       @remove="removeConversation"
+      @search="searchConversations"
+      @load-more="loadMoreConversations"
       @logout="logout"
     />
     <ChatPanel
@@ -363,10 +486,14 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       :pending="pending"
       :error="error"
       :notice="streamNotice"
+      :has-older-messages="messagesHaveMore"
+      :loading-older-messages="messagesLoadingOlder"
+      :loading-messages="messagesLoading"
       @send="send"
 	  @regenerate="regenerate"
 	  @edit-message="editMessage"
 	  @switch-version="switchBranch"
+      @load-older="loadOlderMessages"
       @stop="stop"
     />
   </div>

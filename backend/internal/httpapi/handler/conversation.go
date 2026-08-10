@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/example/agent-platform/backend/internal/httpapi/response"
 	"github.com/example/agent-platform/backend/internal/logger"
@@ -11,13 +12,22 @@ import (
 )
 
 func (h *Handler) ListConversations(c *gin.Context) {
-	items, err := h.conversations.List(c.Request.Context(), currentUserID(c))
+	limit, err := parsePageLimit(c.Query("limit"))
+	if err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "分页参数不正确")
+		return
+	}
+	page, err := h.conversations.ListPage(c.Request.Context(), currentUserID(c), c.Query("cursor"), c.Query("q"), limit)
+	if errors.Is(err, service.ErrInvalidCursor) || errors.Is(err, service.ErrInvalidPageLimit) {
+		response.WriteErrorResp(c, http.StatusBadRequest, "分页参数不正确")
+		return
+	}
 	if err != nil {
 		logger.Error(c.Request.Context(), "list conversations failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
-	response.WriteOKResp(c, gin.H{"conversations": items})
+	response.WriteOKResp(c, gin.H{"conversations": page.Items, "nextCursor": page.NextCursor, "hasMore": page.HasMore})
 }
 
 func (h *Handler) CreateConversation(c *gin.Context) {
@@ -38,13 +48,29 @@ func (h *Handler) CreateConversation(c *gin.Context) {
 }
 
 func (h *Handler) ListMessages(c *gin.Context) {
-	items, err := h.conversations.ListMessages(c.Request.Context(), currentUserID(c), c.Param("conversationID"))
+	limit, err := parsePageLimit(c.Query("limit"))
+	if err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "分页参数不正确")
+		return
+	}
+	page, err := h.conversations.ListMessagesPage(c.Request.Context(), currentUserID(c), c.Param("conversationID"), c.Query("cursor"), limit)
+	if errors.Is(err, service.ErrInvalidCursor) || errors.Is(err, service.ErrInvalidPageLimit) {
+		response.WriteErrorResp(c, http.StatusBadRequest, "分页参数不正确")
+		return
+	}
 	if err != nil {
 		logger.Error(c.Request.Context(), "list messages failed", logger.Err(err))
 		response.WriteErrorResp(c, http.StatusInternalServerError, "服务器内部错误")
 		return
 	}
-	response.WriteOKResp(c, gin.H{"messages": items})
+	response.WriteOKResp(c, gin.H{"messages": page.Items, "nextCursor": page.NextCursor, "hasMore": page.HasMore})
+}
+
+func parsePageLimit(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	return strconv.Atoi(raw)
 }
 
 func (h *Handler) ActivateBranch(c *gin.Context) {

@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { Conversation, User } from '@/types'
 
-defineProps<{
+const props = defineProps<{
   conversations: Conversation[]
   activeID: string | null
   user: User
+  hasMore: boolean
+  loadingMore: boolean
+  searching: boolean
+  searchQuery: string
 }>()
 
 const emit = defineEmits<{
@@ -13,6 +17,8 @@ const emit = defineEmits<{
   select: [id: string]
   rename: [conversation: Conversation, done: (success: boolean, message?: string) => void]
   remove: [conversation: Conversation]
+  search: [query: string]
+  loadMore: []
   logout: []
 }>()
 
@@ -21,6 +27,32 @@ const draftTitle = ref('')
 const renameError = ref('')
 const savingID = ref<string | null>(null)
 const renameInput = ref<HTMLInputElement | null>(null)
+const searchDraft = ref(props.searchQuery)
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(() => props.searchQuery, (query) => {
+  if (query !== searchDraft.value) searchDraft.value = query
+})
+
+onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer)
+})
+
+function scheduleSearch() {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => emit('search', searchDraft.value), 300)
+}
+
+function clearSearch() {
+  searchDraft.value = ''
+  if (searchTimer) clearTimeout(searchTimer)
+  emit('search', '')
+}
+
+function onConversationListScroll(event: Event) {
+  const element = event.currentTarget as HTMLElement
+  if (element.scrollHeight - element.scrollTop - element.clientHeight <= 80) emit('loadMore')
+}
 
 async function startRename(conversation: Conversation) {
   if (savingID.value) return
@@ -75,8 +107,15 @@ function requestRemove(conversation: Conversation) {
       <div class="wordmark"><span class="wordmark-mark" aria-hidden="true"><i /><i /><i /><i /></span><span>Agent Workspace</span></div>
       <button class="new-chat" @click="emit('create')"><b>+</b> 新建对话</button>
     </div>
-    <nav class="conversation-list" aria-label="对话列表">
+    <div class="conversation-search">
+      <label class="sr-only" for="conversation-search">搜索对话</label>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m16 16 4 4" /></svg>
+      <input id="conversation-search" v-model="searchDraft" type="search" placeholder="搜索标题或消息" autocomplete="off" @input="scheduleSearch" />
+      <button v-if="searchDraft" type="button" aria-label="清除搜索" title="清除搜索" @click="clearSearch">×</button>
+    </div>
+    <nav class="conversation-list" aria-label="对话列表" @scroll.passive="onConversationListScroll">
       <p class="nav-label">工作对话</p>
+      <p v-if="searching" class="conversation-search-status" role="status">正在搜索…</p>
       <div
         v-for="conversation in conversations"
         :key="conversation.id"
@@ -114,7 +153,12 @@ function requestRemove(conversation: Conversation) {
           <button :aria-label="`删除 ${conversation.title}`" title="删除" @click="requestRemove(conversation)">×</button>
         </span>
       </div>
-      <p v-if="!conversations.length" class="empty-list">还没有对话<br />点击上方开始。</p>
+      <p v-if="!conversations.length && searchQuery" class="empty-list">没有找到相关对话<br />可以换一个关键词试试。</p>
+      <p v-else-if="!conversations.length" class="empty-list">还没有对话<br />点击上方开始。</p>
+      <button v-if="hasMore" class="load-more-conversations" type="button" :disabled="loadingMore" @click="emit('loadMore')">
+        {{ loadingMore ? '正在加载…' : '加载更多对话' }}
+      </button>
+      <p v-else-if="conversations.length" class="conversation-list-end">已经到底了</p>
     </nav>
     <div class="user-menu">
       <div class="avatar">{{ user.displayName.slice(0, 1).toUpperCase() }}</div>

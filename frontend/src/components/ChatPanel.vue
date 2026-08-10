@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { shouldSendComposerMessage } from '@/lib/composer-keyboard'
+import { buildDisplayMessages } from '@/lib/message-tree'
 import { isNearScrollBottom } from '@/lib/scroll'
 import type { Conversation, Message, ModelProvider } from '@/types'
 
@@ -12,6 +13,9 @@ const props = defineProps<{
   pending: boolean
   error: string
   notice: string
+  hasOlderMessages: boolean
+  loadingOlderMessages: boolean
+  loadingMessages: boolean
 }>()
 
 const emit = defineEmits<{
@@ -19,6 +23,7 @@ const emit = defineEmits<{
   regenerate: [message: Message, provider: string, model: string]
   editMessage: [message: Message, content: string, provider: string, model: string]
   switchVersion: [message: Message]
+  loadOlder: [done: () => void]
   stop: []
 }>()
 
@@ -27,56 +32,13 @@ const selectedProvider = ref('')
 const selectedModel = ref('')
 const viewport = ref<HTMLElement | null>(null)
 const followLatestMessage = ref(true)
+const preservingOlderMessageScroll = ref(false)
 const editingID = ref<string | null>(null)
 const editDraft = ref('')
 
 const models = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.models ?? [])
 const providerLabel = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.label ?? '选择模型')
-const displayMessages = computed(() => {
-	if (!props.messages.some((message) => message.parentMessageId || message.isActiveChild)) return legacyDisplayMessages(props.messages)
-	const children = new Map<string, Message[]>()
-	for (const message of props.messages) {
-		const parentID = message.parentMessageId ?? ''
-		const siblings = children.get(parentID) ?? []
-		siblings.push(message)
-		children.set(parentID, siblings)
-	}
-	for (const siblings of children.values()) siblings.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-
-	const entries: Array<{ message: Message; versions: Message[] }> = []
-	const visited = new Set<string>()
-	let parentID = ''
-	while (true) {
-		const siblings = children.get(parentID) ?? []
-		const active = [...siblings].reverse().find((message) => message.isActiveChild)
-		if (!active || visited.has(active.id)) break
-		visited.add(active.id)
-		entries.push({ message: active, versions: siblings })
-		parentID = active.id
-	}
-	return entries
-})
-
-function legacyDisplayMessages(messages: Message[]) {
-  const groups = new Map<string, Message[]>()
-  for (const message of messages) {
-    if (message.role !== 'assistant' || !message.replyToMessageId) continue
-    const versions = groups.get(message.replyToMessageId) ?? []
-    versions.push(message)
-    groups.set(message.replyToMessageId, versions)
-  }
-  for (const versions of groups.values()) versions.sort((a, b) => (a.responseVersion || 1) - (b.responseVersion || 1))
-
-  const seen = new Set<string>()
-  return messages.flatMap((message) => {
-    if (message.role !== 'assistant' || !message.replyToMessageId) return [{ message, versions: [message] }]
-    if (seen.has(message.replyToMessageId)) return []
-    seen.add(message.replyToMessageId)
-    const versions = groups.get(message.replyToMessageId) ?? [message]
-    const active = [...versions].reverse().find((item) => item.isActiveResponse) ?? versions.at(-1) ?? message
-    return [{ message: active, versions }]
-  })
-}
+const displayMessages = computed(() => buildDisplayMessages(props.messages))
 
 watch(() => props.providers, (providers) => {
   if (!providers.length) return
@@ -93,7 +55,26 @@ watch(() => props.messages.map((item) => `${item.content}\u0000${item.think ?? '
 
 function onViewportScroll() {
   const element = viewport.value
-  if (element) followLatestMessage.value = isNearScrollBottom(element)
+  if (!element) return
+  followLatestMessage.value = isNearScrollBottom(element)
+  if (element.scrollTop <= 80) requestOlderMessages()
+}
+
+function requestOlderMessages() {
+  const element = viewport.value
+  if (!element || preservingOlderMessageScroll.value || props.loadingOlderMessages || !props.hasOlderMessages) return
+  preservingOlderMessageScroll.value = true
+  const conversationID = props.conversation?.id
+  const previousHeight = element.scrollHeight
+  const previousTop = element.scrollTop
+  emit('loadOlder', async () => {
+    await nextTick()
+    const current = viewport.value
+    if (current && props.conversation?.id === conversationID) {
+      current.scrollTop = previousTop + current.scrollHeight - previousHeight
+      preservingOlderMessageScroll.value = false
+    }
+  })
 }
 
 function resumeFollowingLatestMessage() {
@@ -164,6 +145,7 @@ function switchVersion(versions: Message[], current: Message, offset: number) {
 
 watch(() => props.conversation?.id, async () => {
   cancelEditing()
+  preservingOlderMessageScroll.value = false
   resumeFollowingLatestMessage()
   await nextTick()
   viewport.value?.scrollTo({ top: viewport.value.scrollHeight, behavior: 'auto' })
@@ -181,7 +163,13 @@ watch(() => props.conversation?.id, async () => {
     </header>
 
     <div ref="viewport" class="messages" @scroll.passive="onViewportScroll">
-      <section v-if="!conversation" class="welcome-state">
+      <div v-if="conversation && (hasOlderMessages || loadingOlderMessages)" class="older-messages-control">
+        <button type="button" :disabled="loadingOlderMessages || preservingOlderMessageScroll" @click="requestOlderMessages">
+          {{ loadingOlderMessages || preservingOlderMessageScroll ? '正在加载更早消息…' : '加载更早消息' }}
+        </button>
+      </div>
+      <section v-if="loadingMessages" class="messages-loading" role="status"><span />正在加载对话…</section>
+      <section v-else-if="!conversation" class="welcome-state">
         <div class="welcome-mark" aria-hidden="true"><i /><i /><i /><i /></div>
         <p class="eyebrow">START A NEW CONVERSATION</p>
         <h1>从一段对话开始工作</h1>

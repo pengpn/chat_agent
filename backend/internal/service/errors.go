@@ -18,6 +18,8 @@ var (
 	ErrMessageNotFound        = errors.New("message not found")
 	ErrMessageNotRegenerable  = errors.New("message cannot be regenerated")
 	ErrMessageNotEditable     = errors.New("message cannot be edited")
+	ErrInvalidCursor          = errors.New("invalid pagination cursor")
+	ErrInvalidPageLimit       = errors.New("invalid page limit")
 )
 
 // ProviderSelectionError indicates a client selected a provider or model that
