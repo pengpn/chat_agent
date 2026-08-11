@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowReactive } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive } from 'vue'
 import AuthPanel from '@/components/AuthPanel.vue'
+import AccountPanel from '@/components/AccountPanel.vue'
 import ChatPanel from '@/components/ChatPanel.vue'
 import ConversationSidebar from '@/components/ConversationSidebar.vue'
 import { mergeConversations, mergeMessages, sortMessagesAscending } from '@/lib/list-pagination'
@@ -13,6 +14,8 @@ import {
   listConversations,
   listMessages,
   listProviders,
+  logoutSession,
+  refreshAccessToken,
   renameConversation,
   restoreSession,
   saveSession,
@@ -20,12 +23,19 @@ import {
   streamEditedMessage,
   streamRegeneratedMessage,
 	subscribeUserEvents,
+  updateStoredUser,
   type StreamHandlers
 } from '@/lib/api'
 import type { AuthSession, Conversation, Message, ModelProvider, User } from '@/types'
 
 const initialSession = restoreSession()
+const initialURL = new URL(window.location.href)
+const initialVerifyToken = initialURL.searchParams.get('verifyToken')
+const initialResetToken = initialURL.searchParams.get('resetToken')
+const accountAction = ref<'verify' | 'reset' | null>(initialVerifyToken ? 'verify' : initialResetToken ? 'reset' : null)
+const accountToken = ref(initialVerifyToken ?? initialResetToken ?? '')
 const user = ref<User | null>(initialSession?.user ?? null)
+const accountOpen = ref(false)
 const conversations = ref<Conversation[]>([])
 const conversationCursor = ref('')
 const conversationsHaveMore = ref(false)
@@ -40,7 +50,7 @@ const messagesHaveMore = ref(false)
 const messagesLoadingOlder = ref(false)
 const messagesLoading = ref(false)
 const providers = ref<ModelProvider[]>([])
-const booting = ref(Boolean(initialSession))
+const booting = ref(true)
 const error = ref('')
 const streamNotice = ref('')
 const streamControllers = shallowReactive(new Map<string, AbortController>())
@@ -48,22 +58,25 @@ const liveTurns = reactive(new Map<string, { userMessage: Message; assistantMess
 let userEventsController: AbortController | null = null
 let conversationRequestVersion = 0
 let messageRequestVersion = 0
+let accountTrigger: HTMLElement | null = null
 
 const activeConversation = computed(() => conversations.value.find((item) => item.id === activeID.value)
   ?? (activeConversationSnapshot.value?.id === activeID.value ? activeConversationSnapshot.value : null))
 const pending = computed(() => Boolean(activeID.value && streamControllers.has(activeID.value)))
 
 onMounted(async () => {
-  if (initialSession) {
-    try {
-      user.value = await getMe()
+  try {
+    const session = initialSession ?? await refreshAccessToken()
+    user.value = await getMe()
+    if (session.user.emailVerifiedAt !== user.value.emailVerifiedAt) updateStoredUser(user.value)
+    if (!accountAction.value) {
       await loadWorkspace()
 	  startUserEvents()
-    } catch {
-      logout()
-    } finally {
-      booting.value = false
     }
+  } catch {
+    clearLocalState()
+  } finally {
+    booting.value = false
   }
 })
 
@@ -81,6 +94,38 @@ async function authenticated(session: AuthSession) {
   } catch {
     logout()
   }
+}
+
+async function completeAccountAction(action: 'verify' | 'reset', verifiedUser?: User) {
+  accountAction.value = null
+  accountToken.value = ''
+  const url = new URL(window.location.href)
+  url.searchParams.delete('verifyToken')
+  url.searchParams.delete('resetToken')
+  window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+  if (action === 'reset') {
+    clearLocalState()
+    return
+  }
+  if (!user.value || !verifiedUser) return
+  user.value = verifiedUser
+  updateStoredUser(verifiedUser)
+  if (!providers.value.length) {
+    await loadWorkspace()
+    startUserEvents()
+  }
+}
+
+function openAccount() {
+  accountTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  accountOpen.value = true
+}
+
+async function closeAccount() {
+  accountOpen.value = false
+  await nextTick()
+  accountTrigger?.focus()
+  accountTrigger = null
 }
 
 async function loadWorkspace() {
@@ -428,11 +473,21 @@ function refreshConversationOrder(id: string) {
   conversations.value = [...conversations.value].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
-function logout() {
+async function logout() {
+	try {
+		await logoutSession()
+	} catch {
+		// 无论服务端是否可达，都清理本地凭证，避免失效会话残留在界面中。
+	}
+	clearLocalState()
+}
+
+function clearLocalState() {
 	abortAllStreams()
 	userEventsController?.abort()
 	userEventsController = null
   clearSession()
+  accountOpen.value = false
   user.value = null
   conversations.value = []
   conversationCursor.value = ''
@@ -461,7 +516,14 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
 
 <template>
   <div v-if="booting" class="loading-page"><span class="loading-mark" />正在恢复工作台…</div>
-  <AuthPanel v-else-if="!user" @authenticated="authenticated" />
+  <AuthPanel
+    v-else-if="accountAction || !user"
+    :initial-action="accountAction ?? undefined"
+    :action-token="accountToken"
+    :has-session="Boolean(user)"
+    @authenticated="authenticated"
+    @action-complete="completeAccountAction"
+  />
   <div v-else class="app-shell">
     <ConversationSidebar
       :conversations="conversations"
@@ -477,6 +539,7 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       @remove="removeConversation"
       @search="searchConversations"
       @load-more="loadMoreConversations"
+      @account="openAccount"
       @logout="logout"
     />
     <ChatPanel
@@ -492,9 +555,17 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       @send="send"
 	  @regenerate="regenerate"
 	  @edit-message="editMessage"
-	  @switch-version="switchBranch"
+      @switch-version="switchBranch"
       @load-older="loadOlderMessages"
+      @account="openAccount"
       @stop="stop"
+    />
+    <AccountPanel
+      v-if="accountOpen"
+      :user="user"
+      @close="closeAccount"
+      @signed-out="clearLocalState"
+      @deleted="clearLocalState"
     />
   </div>
 </template>

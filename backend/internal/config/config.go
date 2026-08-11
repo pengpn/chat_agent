@@ -40,61 +40,79 @@ type ModelPricing struct {
 }
 
 type Config struct {
-	HTTPAddr                  string
-	DatabaseURL               string
-	DatabaseMaxOpenConns      int
-	DatabaseMaxIdleConns      int
-	DatabaseConnMaxLifetime   time.Duration
-	DatabaseConnMaxIdleTime   time.Duration
-	RedisURL                  string
-	ObjectStorageEndpoint     string
-	ObjectStorageAccessKey    string
-	ObjectStorageSecretKey    string
-	ObjectStorageBucket       string
-	ObjectStorageRegion       string
-	ObjectStorageUseSSL       bool
-	AttachmentMaxBytes        int64
-	AttachmentMaxCount        int
-	AttachmentMaxTextChars    int
-	JWTSecret                 string
-	JWTTTL                    time.Duration
-	CORSAllowedOrigins        []string
-	LogLevel                  string
-	LogDir                    string
-	LogRetentionDays          int
-	MaxToolIterations         int
-	StreamConnectTimeout      time.Duration
-	StreamTTFTTimeout         time.Duration
-	StreamTotalTimeout        time.Duration
-	StreamCacheTTL            time.Duration
-	StreamCacheMaxEvents      int
-	UserEventTTL              time.Duration
-	UserEventMaxEvents        int
-	EnableThinking            bool
-	ThinkingBudgetTokens      int
-	LLMTokenBudget            int64
-	LLMMaxOutputTokens        int64
-	LLMRateTokensPerMinute    int64
-	LLMRateBurst              int64
-	LLMIdempotencyTTL         time.Duration
-	LLMSyncMaxRetries         int
-	LLMRetryBackoff           time.Duration
-	ContextSummaryEnabled     bool
-	ContextSummaryProvider    string
-	ContextSummaryModel       string
-	ContextSummaryMaxTokens   int64
-	ContextKeepRecentMessages int
-	ContextSummaryMaxCalls    int
-	ContextQualityEnabled     bool
-	ContextQualityThreshold   int
-	ContextQualityMaxTokens   int64
-	TitleGenerationProvider   string
-	TitleGenerationModel      string
-	TitleGenerationMaxTokens  int64
-	TitleGenerationMaxLength  int
-	TitleGenerationTimeout    time.Duration
-	SystemPrompt              string
-	Providers                 []ProviderConfig
+	HTTPAddr                    string
+	DatabaseURL                 string
+	DatabaseMaxOpenConns        int
+	DatabaseMaxIdleConns        int
+	DatabaseConnMaxLifetime     time.Duration
+	DatabaseConnMaxIdleTime     time.Duration
+	RedisURL                    string
+	ObjectStorageEndpoint       string
+	ObjectStorageAccessKey      string
+	ObjectStorageSecretKey      string
+	ObjectStorageBucket         string
+	ObjectStorageRegion         string
+	ObjectStorageUseSSL         bool
+	AttachmentMaxBytes          int64
+	AttachmentMaxCount          int
+	AttachmentMaxTextChars      int
+	JWTSecret                   string
+	AccessTokenTTL              time.Duration
+	RefreshTokenTTL             time.Duration
+	RefreshCookieName           string
+	RefreshCookieSecure         bool
+	EmailVerificationTTL        time.Duration
+	PasswordResetTTL            time.Duration
+	PublicWebURL                string
+	EmailDeliveryMode           string
+	SMTPHost                    string
+	SMTPPort                    int
+	SMTPUsername                string
+	SMTPPassword                string
+	SMTPFrom                    string
+	AuthRateLimitWindow         time.Duration
+	AuthLoginRateLimit          int
+	AuthRegisterRateLimit       int
+	AuthPasswordResetRateLimit  int
+	AuthCredentialRetentionDays int
+	AccountAuditRetentionDays   int
+	CORSAllowedOrigins          []string
+	LogLevel                    string
+	LogDir                      string
+	LogRetentionDays            int
+	MaxToolIterations           int
+	StreamConnectTimeout        time.Duration
+	StreamTTFTTimeout           time.Duration
+	StreamTotalTimeout          time.Duration
+	StreamCacheTTL              time.Duration
+	StreamCacheMaxEvents        int
+	UserEventTTL                time.Duration
+	UserEventMaxEvents          int
+	EnableThinking              bool
+	ThinkingBudgetTokens        int
+	LLMTokenBudget              int64
+	LLMMaxOutputTokens          int64
+	LLMRateTokensPerMinute      int64
+	LLMRateBurst                int64
+	LLMIdempotencyTTL           time.Duration
+	LLMSyncMaxRetries           int
+	LLMRetryBackoff             time.Duration
+	ContextSummaryEnabled       bool
+	ContextSummaryProvider      string
+	ContextSummaryModel         string
+	ContextSummaryMaxTokens     int64
+	ContextKeepRecentMessages   int
+	ContextSummaryMaxCalls      int
+	ContextQualityEnabled       bool
+	ContextQualityThreshold     int
+	ContextQualityMaxTokens     int64
+	TitleGenerationProvider     string
+	TitleGenerationModel        string
+	TitleGenerationMaxTokens    int64
+	TitleGenerationMaxLength    int
+	TitleGenerationTimeout      time.Duration
+	SystemPrompt                string
+	Providers                   []ProviderConfig
 }
 
 func Load() (Config, error) {
@@ -106,9 +124,53 @@ func Load() (Config, error) {
 		}
 	}
 
-	ttl, err := time.ParseDuration(env("JWT_TTL_HOURS", "168") + "h")
+	accessTokenTTL, err := positiveDurationEnv("ACCESS_TOKEN_TTL", "15m")
 	if err != nil {
-		return Config{}, fmt.Errorf("parse JWT_TTL_HOURS: %w", err)
+		return Config{}, err
+	}
+	refreshTokenTTL, err := positiveDurationEnv("REFRESH_TOKEN_TTL", "720h")
+	if err != nil {
+		return Config{}, err
+	}
+	emailVerificationTTL, err := positiveDurationEnv("EMAIL_VERIFICATION_TTL", "24h")
+	if err != nil {
+		return Config{}, err
+	}
+	passwordResetTTL, err := positiveDurationEnv("PASSWORD_RESET_TTL", "30m")
+	if err != nil {
+		return Config{}, err
+	}
+	authRateLimitWindow, err := positiveDurationEnv("AUTH_RATE_LIMIT_WINDOW", "15m")
+	if err != nil {
+		return Config{}, err
+	}
+	authLoginRateLimit, err := positiveIntEnv("AUTH_LOGIN_RATE_LIMIT", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	authRegisterRateLimit, err := positiveIntEnv("AUTH_REGISTER_RATE_LIMIT", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	authPasswordResetRateLimit, err := positiveIntEnv("AUTH_PASSWORD_RESET_RATE_LIMIT", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	authCredentialRetentionDays, err := positiveIntEnv("AUTH_CREDENTIAL_RETENTION_DAYS", 30)
+	if err != nil {
+		return Config{}, err
+	}
+	accountAuditRetentionDays, err := positiveIntEnv("ACCOUNT_AUDIT_RETENTION_DAYS", 365)
+	if err != nil {
+		return Config{}, err
+	}
+	refreshCookieSecure, err := boolEnv("REFRESH_COOKIE_SECURE", false)
+	if err != nil {
+		return Config{}, err
+	}
+	smtpPort, err := positiveIntEnv("SMTP_PORT", 587)
+	if err != nil {
+		return Config{}, err
 	}
 	databaseMaxOpenConns, err := positiveIntEnv("DATABASE_MAX_OPEN_CONNS", 20)
 	if err != nil {
@@ -282,64 +344,94 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		HTTPAddr:                  env("HTTP_ADDR", ":8080"),
-		DatabaseURL:               env("DATABASE_URL", "postgres://agent:agent_dev_password@localhost:5432/agent_platform?sslmode=disable"),
-		DatabaseMaxOpenConns:      databaseMaxOpenConns,
-		DatabaseMaxIdleConns:      databaseMaxIdleConns,
-		DatabaseConnMaxLifetime:   databaseConnMaxLifetime,
-		DatabaseConnMaxIdleTime:   databaseConnMaxIdleTime,
-		RedisURL:                  env("REDIS_URL", "redis://localhost:6379/0"),
-		ObjectStorageEndpoint:     env("OBJECT_STORAGE_ENDPOINT", "localhost:9000"),
-		ObjectStorageAccessKey:    env("OBJECT_STORAGE_ACCESS_KEY", "agent_minio"),
-		ObjectStorageSecretKey:    env("OBJECT_STORAGE_SECRET_KEY", "agent_minio_password"),
-		ObjectStorageBucket:       env("OBJECT_STORAGE_BUCKET", "chat-attachments"),
-		ObjectStorageRegion:       env("OBJECT_STORAGE_REGION", "us-east-1"),
-		ObjectStorageUseSSL:       objectStorageUseSSL,
-		AttachmentMaxBytes:        attachmentMaxBytes,
-		AttachmentMaxCount:        attachmentMaxCount,
-		AttachmentMaxTextChars:    attachmentMaxTextChars,
-		JWTSecret:                 os.Getenv("JWT_SECRET"),
-		JWTTTL:                    ttl,
-		CORSAllowedOrigins:        splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
-		LogLevel:                  env("LOG_LEVEL", "INFO"),
-		LogDir:                    env("LOG_DIR", "./logs"),
-		LogRetentionDays:          logRetentionDays,
-		MaxToolIterations:         maxToolIterations,
-		StreamConnectTimeout:      streamConnectTimeout,
-		StreamTTFTTimeout:         streamTTFTTimeout,
-		StreamTotalTimeout:        streamTotalTimeout,
-		StreamCacheTTL:            streamCacheTTL,
-		StreamCacheMaxEvents:      streamCacheMaxEvents,
-		UserEventTTL:              userEventTTL,
-		UserEventMaxEvents:        userEventMaxEvents,
-		EnableThinking:            enableThinking,
-		ThinkingBudgetTokens:      thinkingBudgetTokens,
-		LLMTokenBudget:            llmTokenBudget,
-		LLMMaxOutputTokens:        llmMaxOutputTokens,
-		LLMRateTokensPerMinute:    llmRateTokensPerMinute,
-		LLMRateBurst:              llmRateBurst,
-		LLMIdempotencyTTL:         llmIdempotencyTTL,
-		LLMSyncMaxRetries:         llmSyncMaxRetries,
-		LLMRetryBackoff:           llmRetryBackoff,
-		ContextSummaryEnabled:     contextSummaryEnabled,
-		ContextSummaryProvider:    strings.TrimSpace(os.Getenv("CONTEXT_SUMMARY_PROVIDER")),
-		ContextSummaryModel:       strings.TrimSpace(os.Getenv("CONTEXT_SUMMARY_MODEL")),
-		ContextSummaryMaxTokens:   contextSummaryMaxTokens,
-		ContextKeepRecentMessages: contextKeepRecentMessages,
-		ContextSummaryMaxCalls:    contextSummaryMaxCalls,
-		ContextQualityEnabled:     contextQualityEnabled,
-		ContextQualityThreshold:   contextQualityThreshold,
-		ContextQualityMaxTokens:   contextQualityMaxTokens,
-		TitleGenerationProvider:   strings.TrimSpace(os.Getenv("TITLE_GENERATION_PROVIDER")),
-		TitleGenerationModel:      strings.TrimSpace(os.Getenv("TITLE_GENERATION_MODEL")),
-		TitleGenerationMaxTokens:  titleGenerationMaxTokens,
-		TitleGenerationMaxLength:  titleGenerationMaxLength,
-		TitleGenerationTimeout:    titleGenerationTimeout,
-		SystemPrompt:              env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
-		Providers:                 providers,
+		HTTPAddr:                    env("HTTP_ADDR", ":8080"),
+		DatabaseURL:                 env("DATABASE_URL", "postgres://agent:agent_dev_password@localhost:5432/agent_platform?sslmode=disable"),
+		DatabaseMaxOpenConns:        databaseMaxOpenConns,
+		DatabaseMaxIdleConns:        databaseMaxIdleConns,
+		DatabaseConnMaxLifetime:     databaseConnMaxLifetime,
+		DatabaseConnMaxIdleTime:     databaseConnMaxIdleTime,
+		RedisURL:                    env("REDIS_URL", "redis://localhost:6379/0"),
+		ObjectStorageEndpoint:       env("OBJECT_STORAGE_ENDPOINT", "localhost:9000"),
+		ObjectStorageAccessKey:      env("OBJECT_STORAGE_ACCESS_KEY", "agent_minio"),
+		ObjectStorageSecretKey:      env("OBJECT_STORAGE_SECRET_KEY", "agent_minio_password"),
+		ObjectStorageBucket:         env("OBJECT_STORAGE_BUCKET", "chat-attachments"),
+		ObjectStorageRegion:         env("OBJECT_STORAGE_REGION", "us-east-1"),
+		ObjectStorageUseSSL:         objectStorageUseSSL,
+		AttachmentMaxBytes:          attachmentMaxBytes,
+		AttachmentMaxCount:          attachmentMaxCount,
+		AttachmentMaxTextChars:      attachmentMaxTextChars,
+		JWTSecret:                   os.Getenv("JWT_SECRET"),
+		AccessTokenTTL:              accessTokenTTL,
+		RefreshTokenTTL:             refreshTokenTTL,
+		RefreshCookieName:           env("REFRESH_COOKIE_NAME", "agent_refresh"),
+		RefreshCookieSecure:         refreshCookieSecure,
+		EmailVerificationTTL:        emailVerificationTTL,
+		PasswordResetTTL:            passwordResetTTL,
+		PublicWebURL:                strings.TrimRight(env("PUBLIC_WEB_URL", "http://localhost:5173"), "/"),
+		EmailDeliveryMode:           strings.ToLower(env("EMAIL_DELIVERY_MODE", "log")),
+		SMTPHost:                    strings.TrimSpace(os.Getenv("SMTP_HOST")),
+		SMTPPort:                    smtpPort,
+		SMTPUsername:                strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
+		SMTPPassword:                os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:                    strings.TrimSpace(os.Getenv("SMTP_FROM")),
+		AuthRateLimitWindow:         authRateLimitWindow,
+		AuthLoginRateLimit:          authLoginRateLimit,
+		AuthRegisterRateLimit:       authRegisterRateLimit,
+		AuthPasswordResetRateLimit:  authPasswordResetRateLimit,
+		AuthCredentialRetentionDays: authCredentialRetentionDays,
+		AccountAuditRetentionDays:   accountAuditRetentionDays,
+		CORSAllowedOrigins:          splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:5173")),
+		LogLevel:                    env("LOG_LEVEL", "INFO"),
+		LogDir:                      env("LOG_DIR", "./logs"),
+		LogRetentionDays:            logRetentionDays,
+		MaxToolIterations:           maxToolIterations,
+		StreamConnectTimeout:        streamConnectTimeout,
+		StreamTTFTTimeout:           streamTTFTTimeout,
+		StreamTotalTimeout:          streamTotalTimeout,
+		StreamCacheTTL:              streamCacheTTL,
+		StreamCacheMaxEvents:        streamCacheMaxEvents,
+		UserEventTTL:                userEventTTL,
+		UserEventMaxEvents:          userEventMaxEvents,
+		EnableThinking:              enableThinking,
+		ThinkingBudgetTokens:        thinkingBudgetTokens,
+		LLMTokenBudget:              llmTokenBudget,
+		LLMMaxOutputTokens:          llmMaxOutputTokens,
+		LLMRateTokensPerMinute:      llmRateTokensPerMinute,
+		LLMRateBurst:                llmRateBurst,
+		LLMIdempotencyTTL:           llmIdempotencyTTL,
+		LLMSyncMaxRetries:           llmSyncMaxRetries,
+		LLMRetryBackoff:             llmRetryBackoff,
+		ContextSummaryEnabled:       contextSummaryEnabled,
+		ContextSummaryProvider:      strings.TrimSpace(os.Getenv("CONTEXT_SUMMARY_PROVIDER")),
+		ContextSummaryModel:         strings.TrimSpace(os.Getenv("CONTEXT_SUMMARY_MODEL")),
+		ContextSummaryMaxTokens:     contextSummaryMaxTokens,
+		ContextKeepRecentMessages:   contextKeepRecentMessages,
+		ContextSummaryMaxCalls:      contextSummaryMaxCalls,
+		ContextQualityEnabled:       contextQualityEnabled,
+		ContextQualityThreshold:     contextQualityThreshold,
+		ContextQualityMaxTokens:     contextQualityMaxTokens,
+		TitleGenerationProvider:     strings.TrimSpace(os.Getenv("TITLE_GENERATION_PROVIDER")),
+		TitleGenerationModel:        strings.TrimSpace(os.Getenv("TITLE_GENERATION_MODEL")),
+		TitleGenerationMaxTokens:    titleGenerationMaxTokens,
+		TitleGenerationMaxLength:    titleGenerationMaxLength,
+		TitleGenerationTimeout:      titleGenerationTimeout,
+		SystemPrompt:                env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
+		Providers:                   providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
 		return Config{}, fmt.Errorf("JWT_SECRET must contain at least 32 characters")
+	}
+	if cfg.RefreshTokenTTL <= cfg.AccessTokenTTL {
+		return Config{}, fmt.Errorf("REFRESH_TOKEN_TTL must be longer than ACCESS_TOKEN_TTL")
+	}
+	switch cfg.EmailDeliveryMode {
+	case "log", "disabled":
+	case "smtp":
+		if cfg.SMTPHost == "" || cfg.SMTPFrom == "" {
+			return Config{}, fmt.Errorf("SMTP_HOST and SMTP_FROM are required when EMAIL_DELIVERY_MODE=smtp")
+		}
+	default:
+		return Config{}, fmt.Errorf("EMAIL_DELIVERY_MODE must be log, smtp or disabled")
 	}
 
 	configured := make([]ProviderConfig, 0, len(cfg.Providers))

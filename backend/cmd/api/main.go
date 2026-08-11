@@ -15,8 +15,10 @@ import (
 	"github.com/example/agent-platform/backend/internal/httpapi"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
+	"github.com/example/agent-platform/backend/internal/mailer"
 	"github.com/example/agent-platform/backend/internal/objectstore"
 	"github.com/example/agent-platform/backend/internal/provider"
+	"github.com/example/agent-platform/backend/internal/ratelimit"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/redis/go-redis/v9"
 )
@@ -53,8 +55,14 @@ func main() {
 		os.Exit(1)
 	}
 	repositories := repository.New(db)
+	if err := repositories.Auth.CleanupExpiredCredentials(ctx, time.Now(), time.Now().AddDate(0, 0, -cfg.AuthCredentialRetentionDays)); err != nil {
+		logger.Error(context.Background(), "expired auth credential cleanup failed", logger.Err(err))
+	}
+	if err := repositories.Auth.CleanupAuditLogs(ctx, time.Now().AddDate(0, 0, -cfg.AccountAuditRetentionDays)); err != nil {
+		logger.Error(context.Background(), "account audit cleanup failed", logger.Err(err))
+	}
 
-	jwtManager := auth.NewJWTManager(cfg.JWTSecret, cfg.JWTTTL)
+	jwtManager := auth.NewJWTManager(cfg.JWTSecret, cfg.AccessTokenTTL)
 	providers := provider.NewRegistry(cfg.Providers)
 	store, err := objectstore.NewMinIO(objectstore.Config{
 		Endpoint: cfg.ObjectStorageEndpoint, AccessKey: cfg.ObjectStorageAccessKey, SecretKey: cfg.ObjectStorageSecretKey,
@@ -71,27 +79,43 @@ func main() {
 		logger.Error(context.Background(), "object storage initialization failed", logger.Err(err))
 		os.Exit(1)
 	}
+	redisOptions, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		logger.Error(context.Background(), "invalid Redis URL", logger.Err(err))
+		os.Exit(1)
+	}
+	redisClient := redis.NewClient(redisOptions)
+	redisCtx, cancelRedis := context.WithTimeout(context.Background(), 5*time.Second)
+	err = redisClient.Ping(redisCtx).Err()
+	cancelRedis()
+	if err != nil {
+		_ = redisClient.Close()
+		logger.Error(context.Background(), "redis connection failed", logger.Err(err))
+		os.Exit(1)
+	}
+	defer redisClient.Close()
 	var limiter llmgateway.RateLimiter
-	var redisClient *redis.Client
 	if cfg.LLMRateTokensPerMinute > 0 {
-		redisOptions, err := redis.ParseURL(cfg.RedisURL)
-		if err != nil {
-			logger.Error(context.Background(), "invalid Redis URL", logger.Err(err))
-			os.Exit(1)
-		}
-		redisClient = redis.NewClient(redisOptions)
-		redisCtx, cancelRedis := context.WithTimeout(context.Background(), 5*time.Second)
-		err = redisClient.Ping(redisCtx).Err()
-		cancelRedis()
-		if err != nil {
-			_ = redisClient.Close()
-			logger.Error(context.Background(), "redis connection failed", logger.Err(err))
-			os.Exit(1)
-		}
-		defer redisClient.Close()
 		limiter = llmgateway.NewTokenBucketLimiter(redisClient, cfg.LLMRateTokensPerMinute, cfg.LLMRateBurst, "")
 	}
-	server := httpapi.NewServerWithObjectStore(repositories, jwtManager, providers, limiter, store, cfg)
+
+	var emailSender mailer.Sender
+	switch cfg.EmailDeliveryMode {
+	case "smtp":
+		emailSender, err = mailer.NewSMTP(mailer.SMTPConfig{
+			Host: cfg.SMTPHost, Port: cfg.SMTPPort, Username: cfg.SMTPUsername,
+			Password: cfg.SMTPPassword, From: cfg.SMTPFrom,
+		})
+		if err != nil {
+			logger.Error(context.Background(), "email configuration failed", logger.Err(err))
+			os.Exit(1)
+		}
+	case "disabled":
+		emailSender = mailer.NoopSender{}
+	default:
+		emailSender = mailer.LogSender{}
+	}
+	server := httpapi.NewServerWithDependencies(repositories, jwtManager, providers, limiter, ratelimit.NewRedis(redisClient, ""), store, emailSender, cfg)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

@@ -1,17 +1,14 @@
-import type { Attachment, AuthSession, Conversation, CursorPage, Message, ModelProvider, User } from '@/types'
+import type { Attachment, AuthSession, Conversation, CursorPage, DeviceSession, Message, ModelProvider, User } from '@/types'
 
 const SESSION_KEY = 'agent-platform.session'
 let token = ''
+let refreshPromise: Promise<AuthSession> | null = null
 
 export function restoreSession(): AuthSession | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY)
     if (!raw) return null
     const session = JSON.parse(raw) as AuthSession
-    if (new Date(session.expiresAt) <= new Date()) {
-      localStorage.removeItem(SESSION_KEY)
-      return null
-    }
     token = session.accessToken
     return session
   } catch {
@@ -25,24 +22,64 @@ export function saveSession(session: AuthSession): void {
   localStorage.setItem(SESSION_KEY, JSON.stringify(session))
 }
 
+export function updateStoredUser(user: User): void {
+  const session = restoreSession()
+  if (!session) return
+  saveSession({ ...session, user })
+}
+
 export function clearSession(): void {
   token = ''
   localStorage.removeItem(SESSION_KEY)
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, {
+async function fetchAuthorized(path: string, options: RequestInit = {}, allowRefresh = true): Promise<Response> {
+  let response = await fetch(path, {
     ...options,
+    credentials: 'include',
     headers: {
       ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers
     }
   })
+  if (response.status === 401 && allowRefresh && path !== '/api/v1/auth/refresh') {
+    try {
+      await refreshAccessToken()
+    } catch {
+      return response
+    }
+    response = await fetch(path, {
+      ...options,
+      credentials: 'include',
+      headers: {
+        ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers
+      }
+    })
+  }
+  return response
+}
+
+async function request<T>(path: string, options: RequestInit = {}, allowRefresh = true): Promise<T> {
+  const response = await fetchAuthorized(path, options, allowRefresh)
   if (response.status === 204) return undefined as T
   const body = await response.json().catch(() => ({ code: -1, msg: `请求失败 (${response.status})` })) as ApiResponse<T>
   if (!response.ok || body.code !== 0) throw new Error(body.msg || `请求失败 (${response.status})`)
   return body.data
+}
+
+export function refreshAccessToken(): Promise<AuthSession> {
+  if (refreshPromise) return refreshPromise
+  refreshPromise = (async () => {
+    const response = await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'include' })
+    const body = await response.json().catch(() => ({ code: -1, msg: '登录状态已失效' })) as ApiResponse<AuthSession>
+    if (!response.ok || body.code !== 0) throw new Error(body.msg || '登录状态已失效')
+    saveSession(body.data)
+    return body.data
+  })().finally(() => { refreshPromise = null })
+  return refreshPromise
 }
 
 interface ApiResponse<T> {
@@ -52,11 +89,62 @@ interface ApiResponse<T> {
 }
 
 export async function register(email: string, password: string, displayName: string): Promise<AuthSession> {
-  return request<AuthSession>('/api/v1/auth/register', { method: 'POST', body: JSON.stringify({ email, password, displayName }) })
+  return request<AuthSession>('/api/v1/auth/register', { method: 'POST', body: JSON.stringify({ email, password, displayName }) }, false)
 }
 
 export async function login(email: string, password: string): Promise<AuthSession> {
-  return request<AuthSession>('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+  return request<AuthSession>('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }, false)
+}
+
+export async function logoutSession(): Promise<void> {
+  await request<unknown>('/api/v1/auth/logout', { method: 'POST' }, false)
+}
+
+export async function logoutAllSessions(): Promise<void> {
+  await request<unknown>('/api/v1/auth/logout-all', { method: 'POST' })
+}
+
+export async function listAccountSessions(): Promise<DeviceSession[]> {
+  return (await request<{ sessions: DeviceSession[] }>('/api/v1/auth/sessions')).sessions
+}
+
+export async function revokeAccountSession(sessionID: string): Promise<{ current: boolean }> {
+  return request<{ revoked: boolean; current: boolean }>(`/api/v1/auth/sessions/${sessionID}`, { method: 'DELETE' })
+}
+
+export async function verifyEmail(tokenValue: string): Promise<User> {
+  return (await request<{ user: User }>('/api/v1/auth/verify-email', { method: 'POST', body: JSON.stringify({ token: tokenValue }) }, false)).user
+}
+
+export async function resendEmailVerification(): Promise<void> {
+  await request<unknown>('/api/v1/auth/resend-verification', { method: 'POST' })
+}
+
+export async function forgotPassword(email: string): Promise<void> {
+  await request<unknown>('/api/v1/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }, false)
+}
+
+export async function resetPassword(tokenValue: string, newPassword: string): Promise<void> {
+  await request<unknown>('/api/v1/auth/reset-password', { method: 'POST', body: JSON.stringify({ token: tokenValue, newPassword }) }, false)
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await request<unknown>('/api/v1/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) })
+}
+
+export async function downloadAccountExport(): Promise<void> {
+  const response = await fetchAuthorized('/api/v1/account/export')
+  if (!response.ok) throw new Error(`导出失败 (${response.status})`)
+  const objectURL = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = objectURL
+  anchor.download = 'agent-workspace-export.json'
+  anchor.click()
+  URL.revokeObjectURL(objectURL)
+}
+
+export async function deleteAccount(password: string, confirmation: string): Promise<void> {
+  await request<unknown>('/api/v1/account', { method: 'DELETE', body: JSON.stringify({ password, confirmation }) })
 }
 
 export async function getMe(): Promise<User> {
@@ -147,8 +235,8 @@ export async function subscribeUserEvents(handlers: UserEventHandlers, signal: A
 	let retry = 0
 	while (!signal.aborted) {
 		try {
-			const response = await fetch(`/api/v1/events?afterSequence=${state.lastSequence}`, {
-				headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+			const response = await fetchAuthorized(`/api/v1/events?afterSequence=${state.lastSequence}`, {
+				headers: { Accept: 'text/event-stream' },
 				signal
 			})
 			if (response.status === 409) {
@@ -244,9 +332,9 @@ async function streamRequest(
   signal: AbortSignal,
   idempotencyKey: string
 ): Promise<void> {
-  const response = await fetch(path, {
+  const response = await fetchAuthorized(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Accept: 'text/event-stream', 'Idempotency-Key': idempotencyKey },
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'Idempotency-Key': idempotencyKey },
     body: JSON.stringify(payload),
     signal
   })
@@ -268,8 +356,8 @@ async function streamRequest(
 		handlers.onReconnect(attempt, maxReconnects)
 		if (attempt > 1) await abortableDelay(500 * 2 ** (attempt - 2), signal)
 		try {
-			const resumed = await fetch(`/api/v1/messages/${state.messageID}/stream?afterSequence=${state.lastSequence}`, {
-				headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+			const resumed = await fetchAuthorized(`/api/v1/messages/${state.messageID}/stream?afterSequence=${state.lastSequence}`, {
+				headers: { Accept: 'text/event-stream' },
 				signal
 			})
 			if (!resumed.ok || !resumed.body) {
@@ -353,7 +441,7 @@ export async function deleteAttachment(conversationID: string, attachmentID: str
 }
 
 export async function downloadAttachment(conversationID: string, attachment: Attachment): Promise<void> {
-	const response = await fetch(`/api/v1/conversations/${conversationID}/attachments/${attachment.id}/content`, { headers: { Authorization: `Bearer ${token}` } })
+	const response = await fetchAuthorized(`/api/v1/conversations/${conversationID}/attachments/${attachment.id}/content`)
 	if (!response.ok) throw new Error(`下载失败 (${response.status})`)
 	const url = URL.createObjectURL(await response.blob())
 	const anchor = document.createElement('a'); anchor.href = url; anchor.download = attachment.name; anchor.click()

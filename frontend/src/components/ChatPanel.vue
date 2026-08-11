@@ -25,6 +25,7 @@ const emit = defineEmits<{
   editMessage: [message: Message, content: string, provider: string, model: string]
   switchVersion: [message: Message]
   loadOlder: [done: () => void]
+  account: []
   stop: []
 }>()
 
@@ -255,7 +256,12 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
         <p class="eyebrow">CONVERSATION</p>
         <h2>{{ conversation?.title || '选择或新建一个对话' }}</h2>
       </div>
-      <div class="model-indicator"><span class="status-dot" />{{ providerLabel }} · {{ selectedModel || '未配置' }}</div>
+      <div class="chat-header-actions">
+        <div class="model-indicator"><span class="status-dot" />{{ providerLabel }} · {{ selectedModel || '未配置' }}</div>
+        <button class="mobile-account-button" type="button" aria-label="打开账户与安全设置" title="账户与安全" @click="emit('account')">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5" /><path d="M5.5 19c.8-3.4 3-5.1 6.5-5.1s5.7 1.7 6.5 5.1" /></svg>
+        </button>
+      </div>
     </header>
 
     <div ref="viewport" class="messages" @scroll.passive="onViewportScroll">

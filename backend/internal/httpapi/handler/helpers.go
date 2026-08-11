@@ -7,7 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func currentUserID(c *gin.Context) string { return c.GetString(middleware.UserIDKey) }
+func currentUserID(c *gin.Context) string    { return c.GetString(middleware.UserIDKey) }
+func currentSessionID(c *gin.Context) string { return c.GetString(middleware.SessionIDKey) }
 
 func safeError(err error) string {
 	value := strings.TrimSpace(err.Error())

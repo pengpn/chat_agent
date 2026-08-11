@@ -1,15 +1,25 @@
 // Package service implements application business rules and transaction orchestration.
 package service
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 var (
 	ErrInvalidEmail              = errors.New("invalid email")
 	ErrPasswordTooShort          = errors.New("password too short")
+	ErrPasswordTooLong           = errors.New("password too long")
+	ErrPasswordUnchanged         = errors.New("password unchanged")
 	ErrDisplayNameTooLong        = errors.New("display name too long")
 	ErrEmailAlreadyRegistered    = errors.New("email already registered")
 	ErrInvalidCredentials        = errors.New("invalid credentials")
 	ErrUnauthenticated           = errors.New("unauthenticated")
+	ErrInvalidRefreshToken       = errors.New("invalid refresh token")
+	ErrInvalidAccountToken       = errors.New("invalid account token")
+	ErrEmailDeliveryUnavailable  = errors.New("email delivery unavailable")
+	ErrSessionNotFound           = errors.New("session not found")
+	ErrAccountDeleteConfirmation = errors.New("account delete confirmation invalid")
 	ErrConversationNotFound      = errors.New("conversation not found")
 	ErrEmptyConversationTitle    = errors.New("empty conversation title")
 	ErrInvalidMessageLength      = errors.New("invalid message length")
@@ -30,6 +40,10 @@ var (
 	ErrTooManyAttachments        = errors.New("too many attachments")
 	ErrModelDoesNotSupportVision = errors.New("model does not support image input")
 )
+
+type RateLimitError struct{ RetryAfter time.Duration }
+
+func (e *RateLimitError) Error() string { return "rate limit exceeded" }
 
 // ProviderSelectionError indicates a client selected a provider or model that
 // is unavailable in the current workspace.

@@ -80,6 +80,7 @@
   --shadow-surface: 0 7px 20px rgb(38 52 46 / 4%);
   --shadow-dropdown: 0 16px 40px rgb(35 52 46 / 14%), 0 2px 8px rgb(35 52 46 / 7%);
   --shadow-focus: 0 0 0 3px rgb(15 118 110 / 8%);
+  --color-modal-backdrop: rgb(23 33 31 / 58%);
 
   /* Motion */
   --duration-fast: 160ms;

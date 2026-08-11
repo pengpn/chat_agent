@@ -12,6 +12,8 @@
 - [自动生成对话标题实现解析](./docs/automatic-conversation-title.md)
 - [消息分页与对话搜索实现解析](./docs/message-pagination-and-conversation-search.md)
 - [图片和文件上传实现解析](./docs/image-and-file-attachments.md)
+- [完整账号生命周期实现解析](./docs/account-lifecycle.md)
+- [用户数据保留与删除策略](./docs/data-retention-policy.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -19,7 +21,7 @@
 
 ## 已实现
 
-- 邮箱密码注册、登录、JWT 鉴权
+- 完整账号生命周期：短期 Access Token、可轮换 Refresh Token、设备会话撤销、邮箱验证、密码找回、数据导出和账号注销
 - 一个用户下创建、重命名、删除多个对话
 - PostgreSQL 持久化用户、对话和完整消息历史
 - 同时支持非流式 `Chat` 与 SSE `ChatStream`；流式推送 token 与模型思考增量，前端边接收边渲染
@@ -84,6 +86,8 @@ backend/
     middleware/               # 鉴权、CORS、日志、panic 恢复
     response/                 # 统一的 code/msg/data JSON 响应包装
   internal/logger/            # Zap 日志封装、Request ID 上下文
+  internal/mailer/            # 开发日志或 SMTP 邮件投递
+  internal/ratelimit/         # Redis 账号操作频率限制
   internal/llmgateway/        # 统一模型调用入口：预算、限流、重试、幂等、观测
   internal/objectstore/       # S3/MinIO 对象存储接口和实现
   internal/provider/          # 供应商协议适配器（仅由 LLMGateway 调用）
@@ -95,12 +99,25 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 
 ## API 概览
 
-所有 `/api/v1/*`（除 auth）均需 `Authorization: Bearer <token>`。
+除下表标记为公开的认证入口外，所有 `/api/v1/*` 均需 `Authorization: Bearer <access-token>`。Refresh Token 只保存在 HttpOnly Cookie 中。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| POST | `/api/v1/auth/register` | 注册并返回 token |
-| POST | `/api/v1/auth/login` | 登录 |
+| POST | `/api/v1/auth/register` | 公开：注册、创建设备会话并发送验证邮件 |
+| POST | `/api/v1/auth/login` | 公开：登录并创建设备会话 |
+| POST | `/api/v1/auth/refresh` | 公开：轮换 Refresh Token 并签发短期 Access Token |
+| POST | `/api/v1/auth/logout` | 公开：根据 Refresh Cookie 撤销当前设备会话 |
+| POST | `/api/v1/auth/verify-email` | 公开：消费一次性邮箱验证 Token |
+| POST | `/api/v1/auth/forgot-password` | 公开：申请一次性密码重置链接 |
+| POST | `/api/v1/auth/reset-password` | 公开：重置密码并撤销全部旧会话 |
+| GET | `/api/v1/auth/me` | 当前账户资料 |
+| GET | `/api/v1/auth/sessions` | 列出当前有效的设备会话 |
+| DELETE | `/api/v1/auth/sessions/:sessionID` | 撤销指定设备会话 |
+| POST | `/api/v1/auth/logout-all` | 退出全部设备 |
+| POST | `/api/v1/auth/resend-verification` | 重新发送邮箱验证链接 |
+| POST | `/api/v1/auth/change-password` | 修改密码并退出全部设备 |
+| GET | `/api/v1/account/export` | 下载个人数据 JSON |
+| DELETE | `/api/v1/account` | 校验密码和 `DELETE` 后注销账户 |
 | GET | `/api/v1/models` | 已配置、可用的 Provider / 模型 |
 | GET | `/api/v1/events` | 用户级 SSE：后台标题等工作空间事件与断线补发 |
 | GET/POST | `/api/v1/conversations` | 游标分页/搜索对话列表；新建对话 |
@@ -118,6 +135,14 @@ Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository`
 | GET | `/api/v1/messages/:messageId/stream?afterSequence=N` | 按序号补发短期缓存中的 SSE 片段 |
 
 流式接口依次发送 `metadata`、多个 `think`（模型思考增量）、多个 `delta`（最终回答增量）、最后的 `done` 事件。每个事件都携带 `messageId`、递增 `sequence`，并使用同值的 SSE `id` 字段。非正常终止发送 `interrupted` 或 `error`。
+
+## 账号生命周期配置
+
+Access Token 默认 15 分钟有效；Refresh Token 默认 30 天有效并在每次刷新时轮换。Refresh Token 只通过 HttpOnly、SameSite=Lax Cookie 传递，数据库只存 SHA-256 哈希。鉴权会同时检查 JWT 中的设备会话 ID，因此退出设备、全部退出和修改密码可以让未过期的 Access Token 立即失效。
+
+开发环境默认 `EMAIL_DELIVERY_MODE=log`，邮箱验证与密码重置链接会写入后端结构化日志；生产环境改为 `smtp` 并填写 `SMTP_*`。HTTPS 部署必须设置 `REFRESH_COOKIE_SECURE=true`。`PUBLIC_WEB_URL` 是邮件链接指向的前端地址。
+
+`AUTH_LOGIN_RATE_LIMIT`、`AUTH_REGISTER_RATE_LIMIT` 和 `AUTH_PASSWORD_RESET_RATE_LIMIT` 控制 `AUTH_RATE_LIMIT_WINDOW` 时间窗口内的次数，状态保存在 Redis。`AUTH_CREDENTIAL_RETENTION_DAYS` 控制已撤销/已使用凭据记录的保留期，`ACCOUNT_AUDIT_RETENTION_DAYS` 控制账号安全事件保留期。完整变量及中文说明见 `.env.example`，实现和安全取舍见[完整账号生命周期实现解析](./docs/account-lifecycle.md)。
 
 流式异常按四类处理：
 

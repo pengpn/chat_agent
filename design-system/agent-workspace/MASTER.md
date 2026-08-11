@@ -48,6 +48,7 @@ Agent Workspace 面向各行各业的个人与团队用户，不是只服务工�
 | 品牌悬停 | `--color-primary-hover` | `#0b625c` | 主操作 hover |
 | 侧栏背景 | `--color-sidebar` | `#17211f` | 左侧工作区导航 |
 | 危险状态 | `--color-danger` | `#a13b46` | 错误和破坏性操作 |
+| Modal 遮罩 | `--color-modal-backdrop` | `rgb(23 33 31 / 58%)` | 浮层背景隔离 |
 
 关键对比度：主文字/画布 13.69:1，主色/白色 5.47:1，侧栏主文字/侧栏 14.82:1，均达到 WCAG AA。
 

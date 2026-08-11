@@ -19,6 +19,7 @@ const emit = defineEmits<{
   remove: [conversation: Conversation]
   search: [query: string]
   loadMore: []
+  account: []
   logout: []
 }>()
 
@@ -163,6 +164,9 @@ function requestRemove(conversation: Conversation) {
     <div class="user-menu">
       <div class="avatar">{{ user.displayName.slice(0, 1).toUpperCase() }}</div>
       <div class="user-details"><strong>{{ user.displayName }}</strong><span>{{ user.email }}</span></div>
+      <button title="账户与安全" class="account-settings" aria-label="打开账户与安全设置" @click="emit('account')">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5" /><path d="M5.5 19c.8-3.4 3-5.1 6.5-5.1s5.7 1.7 6.5 5.1" /></svg>
+      </button>
       <button title="退出登录" class="logout" @click="emit('logout')">退出</button>
     </div>
   </aside>

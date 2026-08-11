@@ -1,6 +1,10 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -9,7 +13,8 @@ import (
 )
 
 type Claims struct {
-	Email string `json:"email"`
+	Email     string `json:"email"`
+	SessionID string `json:"sid"`
 	jwt.RegisteredClaims
 }
 
@@ -31,10 +36,11 @@ func VerifyPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
-func (m *JWTManager) Issue(userID, email string) (string, time.Time, error) {
+func (m *JWTManager) Issue(userID, email, sessionID string) (string, time.Time, error) {
 	expiresAt := time.Now().Add(m.ttl)
 	claims := Claims{
-		Email: email,
+		Email:     email,
+		SessionID: sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
@@ -44,6 +50,21 @@ func (m *JWTManager) Issue(userID, email string) (string, time.Time, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(m.secret)
 	return signed, expiresAt, err
+}
+
+// NewOpaqueToken generates a high-entropy token suitable for refresh and
+// one-time account links. Only HashOpaqueToken is persisted.
+func NewOpaqueToken() (string, error) {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func HashOpaqueToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
 
 func (m *JWTManager) Parse(raw string) (Claims, error) {

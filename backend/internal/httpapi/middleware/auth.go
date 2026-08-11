@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -10,8 +11,13 @@ import (
 )
 
 const UserIDKey = "userID"
+const SessionIDKey = "sessionID"
 
-func Authenticate(jwtManager *auth.JWTManager) gin.HandlerFunc {
+type SessionValidator interface {
+	SessionActive(ctx context.Context, userID, sessionID string) (bool, error)
+}
+
+func Authenticate(jwtManager *auth.JWTManager, validator SessionValidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
@@ -20,12 +26,21 @@ func Authenticate(jwtManager *auth.JWTManager) gin.HandlerFunc {
 			return
 		}
 		claims, err := jwtManager.Parse(strings.TrimPrefix(header, "Bearer "))
-		if err != nil || claims.Subject == "" {
+		if err != nil || claims.Subject == "" || claims.SessionID == "" {
 			response.WriteErrorResp(c, http.StatusUnauthorized, "登录状态已失效")
 			c.Abort()
 			return
 		}
+		if validator != nil {
+			active, validationErr := validator.SessionActive(c.Request.Context(), claims.Subject, claims.SessionID)
+			if validationErr != nil || !active {
+				response.WriteErrorResp(c, http.StatusUnauthorized, "登录状态已失效")
+				c.Abort()
+				return
+			}
+		}
 		c.Set(UserIDKey, claims.Subject)
+		c.Set(SessionIDKey, claims.SessionID)
 		c.Next()
 	}
 }

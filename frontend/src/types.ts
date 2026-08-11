@@ -2,7 +2,17 @@ export interface User {
   id: string
   email: string
   displayName: string
+  emailVerifiedAt?: string
   createdAt: string
+}
+
+export interface DeviceSession {
+  id: string
+  deviceName: string
+  current: boolean
+  createdAt: string
+  lastUsedAt: string
+  expiresAt: string
 }
 
 export interface AuthSession {

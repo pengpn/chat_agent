@@ -39,6 +39,7 @@ const messageTreeMigrationVersion = "20260807_message_tree_v1"
 // boundaries for services that coordinate multiple persistence operations.
 type Repositories struct {
 	db            *gorm.DB
+	Auth          AuthRepository
 	Users         UserRepository
 	Conversations ConversationRepository
 	Messages      MessageRepository
@@ -61,6 +62,7 @@ type ChatRepository interface {
 func New(db *gorm.DB) *Repositories {
 	return &Repositories{
 		db:            db,
+		Auth:          newAuthRepository(db),
 		Users:         newUserRepository(db),
 		Conversations: newConversationRepository(db),
 		Messages:      newMessageRepository(db),
@@ -168,6 +170,9 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 	}
 	if err := db.WithContext(ctx).AutoMigrate(
 		&model.User{},
+		&model.AuthSession{},
+		&model.AccountToken{},
+		&model.AccountAuditLog{},
 		&model.Conversation{},
 		&model.Message{},
 		&model.Attachment{},
