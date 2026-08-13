@@ -33,6 +33,7 @@ type AuthRepository interface {
 	CreateSession(ctx context.Context, session *model.AuthSession) error
 	RotateSession(ctx context.Context, tokenHash, nextTokenHash string, now time.Time) (model.AuthSession, error)
 	IsSessionActive(ctx context.Context, userID, sessionID string, now time.Time) (bool, error)
+	SetUserRole(ctx context.Context, userID, role string) error
 	ListSessions(ctx context.Context, userID string) ([]model.AuthSession, error)
 	RevokeSession(ctx context.Context, userID, sessionID, reason string, now time.Time) error
 	RevokeSessionByTokenHash(ctx context.Context, tokenHash, reason string, now time.Time) (model.AuthSession, error)
@@ -114,10 +115,17 @@ func (r *GormAuthRepository) RotateSession(ctx context.Context, tokenHash, nextT
 
 func (r *GormAuthRepository) IsSessionActive(ctx context.Context, userID, sessionID string, now time.Time) (bool, error) {
 	var count int64
+	// 联表检查封禁状态：管理员封禁后，存量会话立即失效，
+	// 不需要等待 Access Token 过期。
 	err := r.db.WithContext(ctx).Model(&model.AuthSession{}).
-		Where("id = ? AND user_id = ? AND revoked_at IS NULL AND expires_at > ?", sessionID, userID, now).
+		Joins("JOIN users ON users.id = auth_sessions.user_id").
+		Where("auth_sessions.id = ? AND auth_sessions.user_id = ? AND auth_sessions.revoked_at IS NULL AND auth_sessions.expires_at > ? AND users.banned_at IS NULL", sessionID, userID, now).
 		Count(&count).Error
 	return count == 1, err
+}
+
+func (r *GormAuthRepository) SetUserRole(ctx context.Context, userID, role string) error {
+	return r.db.WithContext(ctx).Model(&model.User{}).Where("id = ?", userID).Update("role", role).Error
 }
 
 func (r *GormAuthRepository) ListSessions(ctx context.Context, userID string) ([]model.AuthSession, error) {

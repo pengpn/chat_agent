@@ -112,6 +112,23 @@ type Config struct {
 	TitleGenerationMaxLength    int
 	TitleGenerationTimeout      time.Duration
 	SystemPrompt                string
+	QuotaEnabled                bool
+	QuotaDefaultDailyTokens     int64
+	QuotaDefaultMonthlyTokens   int64
+	QuotaMaxConcurrent          int
+	ChatRateLimit               int
+	ChatRateLimitWindow         time.Duration
+	ChatBodyMaxBytes            int64
+	MessageMaxChars             int
+	ToolArgumentMaxBytes        int
+	ToolResultMaxBytes          int
+	ToolExecutionTimeout        time.Duration
+	ToolAdminOnly               []string
+	ModerationEnabled           bool
+	ModerationInputBlocklist    []string
+	ModerationOutputBlocklist   []string
+	AdminEmails                 []string
+	AlertCostThresholdNanoUSD   int64
 	Providers                   []ProviderConfig
 }
 
@@ -337,6 +354,58 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	quotaEnabled, err := boolEnv("QUOTA_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	quotaDefaultDailyTokens, err := positiveInt64Env("QUOTA_DEFAULT_DAILY_TOKENS", 200_000)
+	if err != nil {
+		return Config{}, err
+	}
+	quotaDefaultMonthlyTokens, err := positiveInt64Env("QUOTA_DEFAULT_MONTHLY_TOKENS", 3_000_000)
+	if err != nil {
+		return Config{}, err
+	}
+	quotaMaxConcurrent, err := positiveIntEnv("QUOTA_MAX_CONCURRENT_GENERATIONS", 2)
+	if err != nil {
+		return Config{}, err
+	}
+	chatRateLimit, err := nonNegativeIntEnv("CHAT_RATE_LIMIT", 30)
+	if err != nil {
+		return Config{}, err
+	}
+	chatRateLimitWindow, err := positiveDurationEnv("CHAT_RATE_LIMIT_WINDOW", "1m")
+	if err != nil {
+		return Config{}, err
+	}
+	chatBodyMaxBytes, err := positiveInt64Env("CHAT_BODY_MAX_BYTES", 2<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	messageMaxChars, err := positiveIntEnv("MESSAGE_MAX_CHARS", 100_000)
+	if err != nil {
+		return Config{}, err
+	}
+	toolArgumentMaxBytes, err := positiveIntEnv("TOOL_ARGUMENT_MAX_BYTES", 64<<10)
+	if err != nil {
+		return Config{}, err
+	}
+	toolResultMaxBytes, err := positiveIntEnv("TOOL_RESULT_MAX_BYTES", 32<<10)
+	if err != nil {
+		return Config{}, err
+	}
+	toolExecutionTimeout, err := positiveDurationEnv("TOOL_EXECUTION_TIMEOUT", "30s")
+	if err != nil {
+		return Config{}, err
+	}
+	moderationEnabled, err := boolEnv("MODERATION_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	alertCostThresholdNanoUSD, err := nonNegativeInt64Env("ALERT_COST_THRESHOLD_NANO_USD", 100_000_000)
+	if err != nil {
+		return Config{}, err
+	}
 
 	providers, err := configuredProviders(streamConnectTimeout, llmTokenBudget, llmMaxOutputTokens)
 	if err != nil {
@@ -416,6 +485,23 @@ func Load() (Config, error) {
 		TitleGenerationMaxLength:    titleGenerationMaxLength,
 		TitleGenerationTimeout:      titleGenerationTimeout,
 		SystemPrompt:                env("SYSTEM_PROMPT", "You are a helpful AI assistant."),
+		QuotaEnabled:                quotaEnabled,
+		QuotaDefaultDailyTokens:     quotaDefaultDailyTokens,
+		QuotaDefaultMonthlyTokens:   quotaDefaultMonthlyTokens,
+		QuotaMaxConcurrent:          quotaMaxConcurrent,
+		ChatRateLimit:               chatRateLimit,
+		ChatRateLimitWindow:         chatRateLimitWindow,
+		ChatBodyMaxBytes:            chatBodyMaxBytes,
+		MessageMaxChars:             messageMaxChars,
+		ToolArgumentMaxBytes:        toolArgumentMaxBytes,
+		ToolResultMaxBytes:          toolResultMaxBytes,
+		ToolExecutionTimeout:        toolExecutionTimeout,
+		ToolAdminOnly:               splitCSV(os.Getenv("TOOL_ADMIN_ONLY")),
+		ModerationEnabled:           moderationEnabled,
+		ModerationInputBlocklist:    splitCSV(os.Getenv("MODERATION_INPUT_BLOCKLIST")),
+		ModerationOutputBlocklist:   splitCSV(os.Getenv("MODERATION_OUTPUT_BLOCKLIST")),
+		AdminEmails:                 splitCSV(os.Getenv("ADMIN_EMAILS")),
+		AlertCostThresholdNanoUSD:   alertCostThresholdNanoUSD,
 		Providers:                   providers,
 	}
 	if len(cfg.JWTSecret) < 32 {

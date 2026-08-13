@@ -32,6 +32,9 @@ type AuthConfig struct {
 	LoginRateLimit         int
 	RegisterRateLimit      int
 	PasswordResetRateLimit int
+	// AdminEmails 中的邮箱在注册或登录时会被提升为管理员，
+	// 用于部署初期引导首个管理员账号。
+	AdminEmails []string
 }
 
 type AuthService struct {
@@ -117,7 +120,10 @@ func (s *AuthService) Register(ctx context.Context, input RegisterInput) (AuthRe
 	if err != nil {
 		return AuthResult{}, err
 	}
-	user := model.User{ID: uuid.NewString(), Email: input.Email, PasswordHash: passwordHash, DisplayName: input.DisplayName}
+	user := model.User{ID: uuid.NewString(), Email: input.Email, PasswordHash: passwordHash, DisplayName: input.DisplayName, Role: model.UserRoleUser}
+	if s.isAdminEmail(user.Email) {
+		user.Role = model.UserRoleAdmin
+	}
 	session, rawRefresh, err := s.buildSession(user.ID, input.Client)
 	if err != nil {
 		return AuthResult{}, err
@@ -146,6 +152,16 @@ func (s *AuthService) Login(ctx context.Context, input LoginInput) (AuthResult, 
 	}
 	if err != nil {
 		return AuthResult{}, err
+	}
+	if user.BannedAt != nil {
+		return AuthResult{}, ErrAccountBanned
+	}
+	if s.isAdminEmail(user.Email) && user.Role != model.UserRoleAdmin {
+		if promoteErr := s.repository.SetUserRole(ctx, user.ID, model.UserRoleAdmin); promoteErr != nil {
+			logger.Error(ctx, "promote admin role failed", logger.Err(promoteErr), logger.String("user_id", user.ID))
+		} else {
+			user.Role = model.UserRoleAdmin
+		}
 	}
 	session, rawRefresh, err := s.buildSession(user.ID, input.Client)
 	if err != nil {
@@ -180,6 +196,9 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefresh string, client Cli
 	}
 	if err != nil {
 		return AuthResult{}, err
+	}
+	if user.BannedAt != nil {
+		return AuthResult{}, ErrAccountBanned
 	}
 	s.audit(ctx, user.ID, &session.ID, "session.refreshed", client, nil)
 	return s.authResult(user, session, nextRefresh)
@@ -479,6 +498,15 @@ func (s *AuthService) audit(ctx context.Context, userID string, sessionID *strin
 
 func normalizeEmail(value string) string {
 	return strings.TrimSpace(strings.ToLower(value))
+}
+
+func (s *AuthService) isAdminEmail(email string) bool {
+	for _, candidate := range s.config.AdminEmails {
+		if strings.EqualFold(strings.TrimSpace(candidate), email) {
+			return true
+		}
+	}
+	return false
 }
 
 func validEmail(value string) bool {

@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/example/agent-platform/backend/internal/alerting"
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
+	"github.com/example/agent-platform/backend/internal/moderation"
 	"github.com/example/agent-platform/backend/internal/outputformat"
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/repository"
@@ -29,6 +31,12 @@ type ChatService struct {
 	stream        StreamConfig
 	context       ContextConfig
 	attachments   *AttachmentService
+	// 准入与安全依赖，由 ConfigureSafety 注入，保持 nil 时行为不变。
+	quotas           *QuotaService
+	moderator        moderation.Moderator
+	alerts           alerting.Alerter
+	costAlertNanoUSD int64
+	maxMessageChars  int
 }
 
 type StreamConfig struct {
@@ -76,6 +84,9 @@ type ChatSession struct {
 	preparationCostNanoUSD   int64
 	preparationCostKnown     bool
 	preparationCostTracked   bool
+	// quotaReservedTokens 是本次请求预扣的估算 Token；
+	// 请求结束时必须结算或补偿，0 表示未预扣。
+	quotaReservedTokens int64
 }
 
 type RegenerateInput struct {
@@ -112,10 +123,50 @@ func NewChat(repository repository.ChatRepository, gateway llmgateway.Gateway, t
 	return &ChatService{repository: repository, gateway: gateway, tools: tools, outputFormats: outputFormats, maxToolCalls: maxToolCalls, thinking: thinking, systemPrompt: systemPrompt, stream: stream, context: contextConfig, attachments: attachments}
 }
 
+// SafetyDependencies 聚合额度、内容审核与告警依赖。
+// 任一字段为零值时保持原有行为，方便测试逐步注入。
+type SafetyDependencies struct {
+	Quotas           *QuotaService
+	Moderator        moderation.Moderator
+	Alerts           alerting.Alerter
+	CostAlertNanoUSD int64
+	MaxMessageChars  int
+}
+
+func (s *ChatService) ConfigureSafety(deps SafetyDependencies) {
+	if deps.Quotas != nil {
+		s.quotas = deps.Quotas
+	}
+	if deps.Moderator != nil {
+		s.moderator = deps.Moderator
+	}
+	if deps.Alerts != nil {
+		s.alerts = deps.Alerts
+	}
+	if deps.CostAlertNanoUSD > 0 {
+		s.costAlertNanoUSD = deps.CostAlertNanoUSD
+	}
+	if deps.MaxMessageChars > 0 {
+		s.maxMessageChars = deps.MaxMessageChars
+	}
+}
+
+func (s *ChatService) messageLimit() int {
+	if s.maxMessageChars > 0 {
+		return s.maxMessageChars
+	}
+	return 100_000
+}
+
+// Prepare 校验并落库一轮新的用户提问，组装可供 Stream / Chat 使用的会话。
+// 负责输入校验、附件绑定、分支父消息选择、上下文准备和配额预扣，但不调用模型。
 func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string, input ChatInput) (*ChatSession, error) {
 	input.Content = strings.TrimSpace(input.Content)
-	if (input.Content == "" && len(input.AttachmentIDs) == 0) || len([]rune(input.Content)) > 100_000 {
+	if (input.Content == "" && len(input.AttachmentIDs) == 0) || len([]rune(input.Content)) > s.messageLimit() {
 		return nil, ErrInvalidMessageLength
+	}
+	if blocked := s.checkInputModeration(ctx, userID, input.Content); blocked != nil {
+		return nil, blocked
 	}
 	if input.Temperature != nil && (*input.Temperature < 0 || *input.Temperature > 2) {
 		return nil, ErrInvalidTemperature
@@ -245,6 +296,11 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	session.preparationCostKnown = contextResult.costKnown
 	session.preparationCostTracked = contextResult.costTracked
 	session.request = request
+	if err := s.reserveQuota(ctx, session, input.Provider); err != nil {
+		_, _ = s.finalize(session.AssistantMessage.ID, model.MessageCompletion{Status: "error", FinishReason: quotaFinishReason(err)})
+		s.gateway.Abandon(operationID)
+		return nil, err
+	}
 	return session, nil
 }
 
@@ -406,6 +462,11 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 	session.preparationCostKnown = contextResult.costKnown
 	session.preparationCostTracked = contextResult.costTracked
 	session.request = contextResult.request
+	if err := s.reserveQuota(ctx, session, input.Provider); err != nil {
+		_, _ = s.finalize(session.AssistantMessage.ID, model.MessageCompletion{Status: "error", FinishReason: quotaFinishReason(err)})
+		s.gateway.Abandon(operationID)
+		return nil, err
+	}
 	return session, nil
 }
 
@@ -413,8 +474,11 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 // original user message and its complete descendant subtree remain unchanged.
 func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, targetMessageID string, input ChatInput) (*ChatSession, error) {
 	input.Content = strings.TrimSpace(input.Content)
-	if input.Content == "" || len([]rune(input.Content)) > 100_000 {
+	if input.Content == "" || len([]rune(input.Content)) > s.messageLimit() {
 		return nil, ErrInvalidMessageLength
+	}
+	if blocked := s.checkInputModeration(ctx, userID, input.Content); blocked != nil {
+		return nil, blocked
 	}
 	if input.Temperature != nil && (*input.Temperature < 0 || *input.Temperature > 2) {
 		return nil, ErrInvalidTemperature
@@ -536,6 +600,11 @@ func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, t
 	session.preparationCostKnown = contextResult.costKnown
 	session.preparationCostTracked = contextResult.costTracked
 	session.request = contextResult.request
+	if err := s.reserveQuota(ctx, session, input.Provider); err != nil {
+		_, _ = s.finalize(session.AssistantMessage.ID, model.MessageCompletion{Status: "error", FinishReason: quotaFinishReason(err)})
+		s.gateway.Abandon(operationID)
+		return nil, err
+	}
 	return session, nil
 }
 
@@ -632,7 +701,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		toolCalls++
 		// 执行本轮模型请求的工具：把 assistant（含 tool_calls）和各 tool 结果追加进 messages，
 		// 供下一轮 ChatStream 继续对话。
-		messages = s.executeToolCalls(streamCtx, messages, turn.answer, turn.think, turn.toolCalls)
+		messages = s.executeToolCalls(streamCtx, session.UserID, messages, turn.answer, turn.think, turn.toolCalls)
 	}
 	if ctx.Err() != nil {
 		status = "stopped"
@@ -643,6 +712,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	} else if status == "complete" && finishReason == "" {
 		finishReason = "stop"
 	}
+	s.moderateOutput(ctx, session, &answer, &think, &structuredOutput, &status, &finishReason)
 	usageData := model.MessageUsage{
 		InputTokens:   usage.InputTokens,
 		OutputTokens:  usage.OutputTokens,
@@ -650,6 +720,8 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		UsageReported: usageReported,
 	}
 	s.applyConversationCost(session, &usageData, conversationUsage, conversationUsageReported)
+	s.settleQuota(session, &usageData, status)
+	s.alertCostAnomaly(ctx, session, usageData)
 	completed, err := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
 		Content: answer.String(), Think: think.String(), StructuredOutput: model.JSONDocument(structuredOutput), Status: status, FinishReason: finishReason, Usage: usageData,
 	})
@@ -822,7 +894,7 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 			break
 		}
 		toolCalls++
-		messages = s.executeToolCalls(ctx, messages, result.Content, result.Think, result.ToolCalls)
+		messages = s.executeToolCalls(ctx, session.UserID, messages, result.Content, result.Think, result.ToolCalls)
 	}
 	if ctx.Err() != nil {
 		status = "stopped"
@@ -830,6 +902,11 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 			chatErr = ctx.Err()
 		}
 	}
+	finishReason := "stop"
+	if status != "complete" {
+		finishReason = status
+	}
+	s.moderateOutput(ctx, session, &answer, &think, &structuredOutput, &status, &finishReason)
 	usageData := model.MessageUsage{
 		InputTokens:   usage.InputTokens,
 		OutputTokens:  usage.OutputTokens,
@@ -837,10 +914,8 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		UsageReported: usageReported,
 	}
 	s.applyConversationCost(session, &usageData, conversationUsage, conversationUsageReported)
-	finishReason := "stop"
-	if status != "complete" {
-		finishReason = status
-	}
+	s.settleQuota(session, &usageData, status)
+	s.alertCostAnomaly(ctx, session, usageData)
 	completed, finalizeErr := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
 		Content: answer.String(), Think: think.String(), StructuredOutput: model.JSONDocument(structuredOutput), Status: status, FinishReason: finishReason, Usage: usageData,
 	})
@@ -887,7 +962,7 @@ func (s *ChatService) finalize(messageID string, completion model.MessageComplet
 	return s.repository.Finalize(ctx, messageID, completion)
 }
 
-func (s *ChatService) executeToolCalls(ctx context.Context, messages []provider.Message, assistantContent, assistantThink string, calls []provider.ToolCall) []provider.Message {
+func (s *ChatService) executeToolCalls(ctx context.Context, userID string, messages []provider.Message, assistantContent, assistantThink string, calls []provider.ToolCall) []provider.Message {
 	messages = append(messages, provider.Message{Role: "assistant", Content: assistantContent, ReasoningContent: assistantThink, ToolCalls: calls})
 	// 循环执行工具调用：把 tool 执行结果追加进 messages，供下一轮 ChatStream 继续对话。
 	for _, call := range calls {
@@ -898,7 +973,7 @@ func (s *ChatService) executeToolCalls(ctx context.Context, messages []provider.
 			logger.String("tool_call_id", call.ID),
 			logger.String("tool_name", call.Function.Name),
 		)
-		content, err := s.tools.Execute(ctx, call)
+		content, err := s.tools.ExecuteForUser(ctx, userID, call)
 		if err != nil {
 			logger.Warn(ctx, "tool execution failed",
 				logger.String("tool_call_id", call.ID),
@@ -922,4 +997,129 @@ func toolErrorResult(err error) string {
 		Error string `json:"error"`
 	}{Error: err.Error()})
 	return string(payload)
+}
+
+// checkInputModeration 在用户内容落库和调用模型之前执行输入审核。
+// 命中策略时不创建任何消息，直接拒绝请求。
+func (s *ChatService) checkInputModeration(ctx context.Context, userID, content string) error {
+	if s.moderator == nil || content == "" {
+		return nil
+	}
+	decision := s.moderator.Check(moderation.DirectionInput, content)
+	if !decision.Blocked {
+		return nil
+	}
+	s.alertModeration(ctx, userID, string(moderation.DirectionInput), decision.Term)
+	return ErrContentBlockedByModeration
+}
+
+// moderateOutput 在落库前审核最终回答。命中策略时丢弃模型原文，
+// 替换为固定提示文案并标记 finish_reason，避免违规内容进入持久化。
+func (s *ChatService) moderateOutput(ctx context.Context, session *ChatSession, answer, think *strings.Builder, structuredOutput *json.RawMessage, status, finishReason *string) {
+	if s.moderator == nil || answer.Len() == 0 {
+		return
+	}
+	if *status != "complete" && *status != "stopped" {
+		return
+	}
+	decision := s.moderator.Check(moderation.DirectionOutput, answer.String())
+	if !decision.Blocked {
+		return
+	}
+	answer.Reset()
+	answer.WriteString(moderation.BlockedReply)
+	think.Reset()
+	*structuredOutput = nil
+	*finishReason = "moderation_blocked"
+	s.alertModeration(ctx, session.UserID, string(moderation.DirectionOutput), decision.Term)
+}
+
+func (s *ChatService) alertModeration(ctx context.Context, userID, direction, term string) {
+	if s.alerts == nil {
+		return
+	}
+	s.alerts.Alert(ctx, alerting.KindModerationHit,
+		logger.String("user_id", userID),
+		logger.String("direction", direction),
+		logger.String("term", term),
+	)
+}
+
+// reserveQuota 在调用模型前按“估算输入 + 最大输出预留”预扣额度。
+// 预扣失败时不会发起任何计费调用，消息直接以 error 终态落库。
+func (s *ChatService) reserveQuota(ctx context.Context, session *ChatSession, providerID string) error {
+	if s.quotas == nil {
+		return nil
+	}
+	budget, err := s.gateway.TokenBudget(providerID, session.AssistantMessage.Model, 0)
+	if err != nil {
+		return err
+	}
+	inputTokens, err := s.gateway.EstimateInputTokens(providerID, session.request)
+	if err != nil {
+		return err
+	}
+	estimate := inputTokens + budget.MaxOutputTokens
+	if err := s.quotas.Reserve(ctx, session.UserID, estimate); err != nil {
+		if s.alerts != nil && (errors.Is(err, ErrDailyQuotaExceeded) || errors.Is(err, ErrMonthlyQuotaExceeded) || errors.Is(err, ErrTooManyConcurrentGenerations)) {
+			s.alerts.Alert(ctx, alerting.KindQuotaExhausted,
+				logger.String("user_id", session.UserID),
+				logger.String("reason", err.Error()),
+				logger.Int64("estimated_tokens", estimate),
+			)
+		}
+		return err
+	}
+	session.quotaReservedTokens = estimate
+	return nil
+}
+
+// settleQuota 按实际用量结算预扣额度。结算刻意使用独立的短超时上下文，
+// 客户端取消或服务端超时不会导致预扣永久泄漏。
+func (s *ChatService) settleQuota(session *ChatSession, usageData *model.MessageUsage, status string) {
+	if s.quotas == nil || session.quotaReservedTokens <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var err error
+	switch {
+	case usageData.UsageReported:
+		err = s.quotas.Settle(ctx, session.UserID, session.quotaReservedTokens, usageData.TotalTokens)
+	case status == "complete":
+		// 用量未知但回答已完成：按预扣值结算，宁可多扣不漏扣。
+		err = s.quotas.Settle(ctx, session.UserID, session.quotaReservedTokens, session.quotaReservedTokens)
+	default:
+		// 请求失败且没有可用用量：补偿预扣额度。
+		err = s.quotas.Release(ctx, session.UserID, session.quotaReservedTokens)
+	}
+	if err != nil {
+		logger.Error(ctx, "quota settlement failed", logger.Err(err), logger.String("user_id", session.UserID))
+	}
+	session.quotaReservedTokens = 0
+}
+
+func (s *ChatService) alertCostAnomaly(ctx context.Context, session *ChatSession, usageData model.MessageUsage) {
+	if s.alerts == nil || s.costAlertNanoUSD <= 0 {
+		return
+	}
+	if !usageData.CostKnown || usageData.CostNanoUSD < s.costAlertNanoUSD {
+		return
+	}
+	s.alerts.Alert(ctx, alerting.KindCostAnomaly,
+		logger.String("user_id", session.UserID),
+		logger.String("assistant_message_id", session.AssistantMessage.ID),
+		logger.Int64("cost_nano_usd", usageData.CostNanoUSD),
+		logger.Int64("total_tokens", usageData.TotalTokens),
+	)
+}
+
+func quotaFinishReason(err error) string {
+	switch {
+	case errors.Is(err, ErrDailyQuotaExceeded), errors.Is(err, ErrMonthlyQuotaExceeded):
+		return "quota_exceeded"
+	case errors.Is(err, ErrTooManyConcurrentGenerations):
+		return "concurrency_limit"
+	}
+	return "quota_error"
 }

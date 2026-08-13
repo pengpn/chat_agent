@@ -42,6 +42,9 @@ func (h *Handler) RegenerateMessage(c *gin.Context) {
 		OutputFormat string   `json:"outputFormat"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
+		if h.writeBodyTooLarge(c, err) {
+			return
+		}
 		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
@@ -69,6 +72,9 @@ func (h *Handler) EditMessage(c *gin.Context) {
 		OutputFormat string   `json:"outputFormat"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
+		if h.writeBodyTooLarge(c, err) {
+			return
+		}
 		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
@@ -236,6 +242,9 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		AttachmentIDs []string `json:"attachmentIds"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
+		if h.writeBodyTooLarge(c, err) {
+			return nil, false
+		}
 		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
 		return nil, false
 	}
@@ -257,7 +266,15 @@ func (h *Handler) handlePrepareError(c *gin.Context, err error) bool {
 	case err == nil:
 		return true
 	case errors.Is(err, service.ErrInvalidMessageLength):
-		response.WriteErrorResp(c, http.StatusBadRequest, "消息长度应在 1 到 100000 个字符之间")
+		response.WriteErrorResp(c, http.StatusBadRequest, "消息长度超过限制，请缩短内容后重试")
+	case errors.Is(err, service.ErrContentBlockedByModeration):
+		response.WriteErrorResp(c, http.StatusForbidden, "内容可能包含敏感信息，无法发送")
+	case errors.Is(err, service.ErrDailyQuotaExceeded):
+		response.WriteErrorResp(c, http.StatusTooManyRequests, "今日额度已用完，请明天再试")
+	case errors.Is(err, service.ErrMonthlyQuotaExceeded):
+		response.WriteErrorResp(c, http.StatusTooManyRequests, "本月额度已用完，请下月再试")
+	case errors.Is(err, service.ErrTooManyConcurrentGenerations):
+		response.WriteErrorResp(c, http.StatusTooManyRequests, "同时生成的请求过多，请等待当前回答完成")
 	case errors.Is(err, service.ErrInvalidTemperature):
 		response.WriteErrorResp(c, http.StatusBadRequest, "temperature 必须在 0 到 2 之间")
 	case errors.Is(err, service.ErrOutputFormatNotFound):
@@ -330,4 +347,15 @@ func (h *Handler) appendAndWriteStreamEvent(w http.ResponseWriter, flusher http.
 func writeCachedSSE(w http.ResponseWriter, flusher http.Flusher, sequence int64, name string, data []byte) {
 	_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", sequence, name, data)
 	flusher.Flush()
+}
+
+// writeBodyTooLarge 识别请求体超过 MaxBodyBytes 限制的绑定错误，
+// 以 413 响应；未命中时返回 false 由调用方继续常规错误处理。
+func (h *Handler) writeBodyTooLarge(c *gin.Context, err error) bool {
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		response.WriteErrorResp(c, http.StatusRequestEntityTooLarge, "请求内容超过大小限制")
+		return true
+	}
+	return false
 }

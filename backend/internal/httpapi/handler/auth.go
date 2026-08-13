@@ -244,6 +244,8 @@ func (h *Handler) writeAuthError(c *gin.Context, err error, logMessage, fallback
 		response.WriteErrorResp(c, http.StatusConflict, "该邮箱已注册")
 	case errors.Is(err, service.ErrInvalidCredentials):
 		response.WriteErrorResp(c, http.StatusUnauthorized, "邮箱或密码错误")
+	case errors.Is(err, service.ErrAccountBanned):
+		response.WriteErrorResp(c, http.StatusForbidden, "账号已被封禁，如有疑问请联系管理员")
 	case errors.Is(err, service.ErrInvalidRefreshToken):
 		response.WriteErrorResp(c, http.StatusUnauthorized, "登录状态已失效")
 	case errors.Is(err, service.ErrInvalidAccountToken):

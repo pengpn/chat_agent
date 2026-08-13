@@ -39,6 +39,14 @@ var (
 	ErrAttachmentAlreadyUsed     = errors.New("attachment already belongs to a message")
 	ErrTooManyAttachments        = errors.New("too many attachments")
 	ErrModelDoesNotSupportVision = errors.New("model does not support image input")
+	// 额度与并发准入错误：预扣失败时直接拒绝请求，不创建任何消息。
+	ErrDailyQuotaExceeded           = errors.New("daily quota exceeded")
+	ErrMonthlyQuotaExceeded         = errors.New("monthly quota exceeded")
+	ErrTooManyConcurrentGenerations = errors.New("too many concurrent generations")
+	ErrContentBlockedByModeration   = errors.New("content blocked by moderation")
+	ErrAccountBanned                = errors.New("account banned")
+	ErrAdminSelfOperation           = errors.New("admin cannot perform this operation on self")
+	ErrInvalidQuotaLimit            = errors.New("invalid quota limit")
 )
 
 type RateLimitError struct{ RetryAfter time.Duration }

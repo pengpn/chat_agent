@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
@@ -15,6 +16,9 @@ type UserRepository interface {
 	Create(ctx context.Context, user *model.User) error
 	FindByEmail(ctx context.Context, email string) (model.User, error)
 	FindByID(ctx context.Context, id string) (model.User, error)
+	// SetBanned 封禁或解封用户；目标用户不存在时返回 domain.ErrNotFound。
+	SetBanned(ctx context.Context, userID string, banned bool, now time.Time) error
+	SetRole(ctx context.Context, userID, role string) error
 }
 
 // GormUserRepository is the PostgreSQL/GORM implementation of UserRepository.
@@ -46,6 +50,32 @@ func (r *GormUserRepository) FindByID(ctx context.Context, id string) (model.Use
 		return model.User{}, domain.ErrNotFound
 	}
 	return user, err
+}
+
+func (r *GormUserRepository) SetBanned(ctx context.Context, userID string, banned bool, now time.Time) error {
+	value := any(nil)
+	if banned {
+		value = now
+	}
+	result := r.db.WithContext(ctx).Model(&model.User{}).Where("id = ?", userID).Update("banned_at", value)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+func (r *GormUserRepository) SetRole(ctx context.Context, userID, role string) error {
+	result := r.db.WithContext(ctx).Model(&model.User{}).Where("id = ?", userID).Update("role", role)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
 }
 
 func isUniqueViolation(err error) bool {
