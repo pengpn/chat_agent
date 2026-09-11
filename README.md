@@ -14,6 +14,7 @@
 - [图片和文件上传实现解析](./docs/image-and-file-attachments.md)
 - [完整账号生命周期实现解析](./docs/account-lifecycle.md)
 - [用户数据保留与删除策略](./docs/data-retention-policy.md)
+- [RAG 第一阶段：领域模型与 pgvector 基础](./docs/rag-01-domain-and-pgvector.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -39,12 +40,13 @@
 - 自动对话标题：首个成功回答后异步生成、失败降级、手动改名保护及独立 Token/成本核算
 - 消息与对话游标分页：最近消息优先、向上加载历史、侧栏增量加载，以及按标题或消息正文搜索
 - 安全附件：MinIO 对象存储、真实 MIME 校验、TXT/PDF/DOCX 提取、图片视觉输入、失败重试和权限绑定
+- RAG 数据基础：独立知识库、文档、分块和引用模型，pgvector 向量字段及用户级 Repository 权限边界
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
 ## 快速启动
 
-需要 Go 1.23+、Node.js 20+、Docker。
+需要 Go 1.23+、Node.js 20+、Docker。PostgreSQL 使用 `pgvector/pgvector:0.8.6-pg16`，在 PostgreSQL 16 基础上预装 vector 扩展。
 
 ```bash
 cp .env.example .env
@@ -77,7 +79,7 @@ backend/
     db.go
     model/                     # GORM 表结构：用户、会话、消息
   internal/domain/            # 跨层领域错误与领域对象（按需扩展）
-  internal/repository/        # Repository 接口、GORM 实现与迁移
+  internal/repository/        # Repository 接口、GORM 实现与迁移（含 KnowledgeRepository）
   internal/service/           # 业务规则、模型调用与事务编排
   internal/httpapi/           # Gin 路由与 HTTP 横切能力
     server.go                 # HTTP 服务依赖组装
@@ -96,6 +98,8 @@ frontend/src/                 # Vue 3 对话 UI
 ```
 
 Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository` 是接口，`GormUserRepository` 是实现。Service 依赖接口，因此单测仍可注入 fake 实现，而无需连接数据库。
+
+RAG 第一阶段只完成数据与持久化基础，尚未开放知识库 API，也尚未调用 Embedding 模型。知识库文档与对话附件拥有不同生命周期；分块向量由 pgvector 保存，查询始终带当前 `userID` 权限过滤。详细设计、数据关系和本地验证方式见 [RAG 第一阶段学习文档](./docs/rag-01-domain-and-pgvector.md)。
 
 ## API 概览
 
@@ -300,9 +304,11 @@ OpenAI-compatible Provider（OpenAI、Kimi、DeepSeek、GLM）在每次请求中
 
 `provider.Provider` 是核心扩展点。新增供应商只需实现 `Chat(ctx, request) (ChatResponse, error)` 与 `ChatStream(ctx, request) <-chan StreamEvent`，然后在 `provider.NewRegistry` 注册；上层 HTTP 和数据库完全不用改。OpenAI 兼容协议的供应商只需新增一段配置。
 
-建议按这个顺序扩展：
+当前 RAG 学习路线建议按这个顺序扩展：
 
-1. 增加文档上传、切分、embedding、pgvector 检索（RAG）。
-2. 为 Agent 增加循环上限、工具权限、审计和可观测 trace。
+1. 实现独立 `EmbeddingGateway`，先打通批量向量生成、维度校验、成本与缓存。
+2. 实现知识文档摄取状态机与结构感知切分。
+3. 先用 pgvector 精确检索建立正确性基线，再接入引用约束回答和前端来源面板。
+4. 建立离线评估集后，再选择性引入混合检索、Reranker 和 HNSW。
 
 生产环境请使用强随机 `JWT_SECRET`、HTTPS、受限 CORS、密钥管理服务与数据库备份；目前的自动迁移适合作为学习与开发起点。

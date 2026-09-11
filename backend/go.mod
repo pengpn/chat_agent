@@ -10,6 +10,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/minio/minio-go/v7 v7.0.95
+	github.com/pgvector/pgvector-go v0.3.0
 	github.com/redis/go-redis/v9 v9.7.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/tiktoken-go/tokenizer v0.7.0

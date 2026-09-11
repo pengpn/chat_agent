@@ -20,6 +20,10 @@ type AccountExport struct {
 	Conversations               []model.Conversation               `json:"conversations"`
 	Messages                    []model.Message                    `json:"messages"`
 	Attachments                 []model.Attachment                 `json:"attachments"`
+	KnowledgeBases              []model.KnowledgeBase              `json:"knowledgeBases"`
+	KnowledgeDocuments          []model.KnowledgeDocument          `json:"knowledgeDocuments"`
+	KnowledgeChunks             []model.KnowledgeChunk             `json:"knowledgeChunks"`
+	MessageCitations            []model.MessageCitation            `json:"messageCitations"`
 	ConversationSummaryVersions []model.ConversationSummaryVersion `json:"conversationSummaryVersions"`
 	AuditLogs                   []model.AccountAuditLog            `json:"accountAuditLogs"`
 }
@@ -298,6 +302,10 @@ func (r *GormAuthRepository) ExportAccount(ctx context.Context, userID string, n
 		{&result.Conversations, r.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at ASC")},
 		{&result.Messages, r.db.WithContext(ctx).Where("conversation_id IN (?)", r.db.Model(&model.Conversation{}).Select("id").Where("user_id = ?", userID)).Order("created_at ASC")},
 		{&result.Attachments, r.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at ASC")},
+		{&result.KnowledgeBases, r.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at ASC")},
+		{&result.KnowledgeDocuments, r.db.WithContext(ctx).Where("knowledge_base_id IN (?)", r.db.Model(&model.KnowledgeBase{}).Select("id").Where("user_id = ?", userID)).Order("created_at ASC")},
+		{&result.KnowledgeChunks, r.db.WithContext(ctx).Where("document_id IN (?)", r.db.Model(&model.KnowledgeDocument{}).Select("id").Where("knowledge_base_id IN (?)", r.db.Model(&model.KnowledgeBase{}).Select("id").Where("user_id = ?", userID))).Order("created_at ASC")},
+		{&result.MessageCitations, r.db.WithContext(ctx).Where("message_id IN (?)", r.db.Model(&model.Message{}).Select("id").Where("conversation_id IN (?)", r.db.Model(&model.Conversation{}).Select("id").Where("user_id = ?", userID))).Order("created_at ASC")},
 		{&result.ConversationSummaryVersions, r.db.WithContext(ctx).Where("conversation_id IN (?)", r.db.Model(&model.Conversation{}).Select("id").Where("user_id = ?", userID)).Order("created_at ASC")},
 		{&result.AuditLogs, r.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at ASC")},
 	}
@@ -311,8 +319,14 @@ func (r *GormAuthRepository) ExportAccount(ctx context.Context, userID string, n
 
 func (r *GormAuthRepository) ListObjectKeysByUser(ctx context.Context, userID string) ([]string, error) {
 	var keys []string
-	err := r.db.WithContext(ctx).Model(&model.Attachment{}).Where("user_id = ?", userID).Pluck("object_key", &keys).Error
-	return keys, err
+	if err := r.db.WithContext(ctx).Model(&model.Attachment{}).Where("user_id = ?", userID).Pluck("object_key", &keys).Error; err != nil {
+		return nil, err
+	}
+	var knowledgeKeys []string
+	err := r.db.WithContext(ctx).Model(&model.KnowledgeDocument{}).
+		Where("knowledge_base_id IN (?)", r.db.Model(&model.KnowledgeBase{}).Select("id").Where("user_id = ?", userID)).
+		Pluck("object_key", &knowledgeKeys).Error
+	return append(keys, knowledgeKeys...), err
 }
 
 func (r *GormAuthRepository) DeleteAccount(ctx context.Context, userID string) error {

@@ -45,6 +45,7 @@ type Repositories struct {
 	Messages      MessageRepository
 	Attachments   AttachmentRepository
 	Quotas        QuotaRepository
+	Knowledge     KnowledgeRepository
 }
 
 // ChatRepository groups the persistence operations required for a conversation
@@ -69,6 +70,7 @@ func New(db *gorm.DB) *Repositories {
 		Messages:      newMessageRepository(db),
 		Attachments:   newAttachmentRepository(db),
 		Quotas:        newQuotaRepository(db),
+		Knowledge:     newKnowledgeRepository(db),
 	}
 }
 
@@ -170,6 +172,9 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 	if err := db.WithContext(ctx).Exec("CREATE EXTENSION IF NOT EXISTS pg_trgm").Error; err != nil {
 		return err
 	}
+	if err := db.WithContext(ctx).Exec("CREATE EXTENSION IF NOT EXISTS vector").Error; err != nil {
+		return err
+	}
 	if err := db.WithContext(ctx).AutoMigrate(
 		&model.User{},
 		&model.AuthSession{},
@@ -181,7 +186,14 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		&model.AttachmentChunk{},
 		&model.ConversationSummaryVersion{},
 		&model.UserQuota{},
+		&model.KnowledgeBase{},
+		&model.KnowledgeDocument{},
+		&model.KnowledgeChunk{},
+		&model.MessageCitation{},
 	); err != nil {
+		return err
+	}
+	if err := ensureKnowledgeForeignKeys(ctx, db); err != nil {
 		return err
 	}
 	if err := migrateMessageTree(ctx, db); err != nil {
@@ -210,6 +222,44 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		ALTER TABLE conversations ADD CONSTRAINT conversations_title_status_check
 		CHECK (title_status IN ('default', 'generating', 'generated', 'fallback', 'manual'))
 	`).Error
+}
+
+// ensureKnowledgeForeignKeys makes deletion semantics deterministic for both
+// new and already migrated databases. GORM derives has-many constraints from
+// the parent association and AutoMigrate does not alter an existing constraint
+// when only its ON DELETE action changes.
+func ensureKnowledgeForeignKeys(ctx context.Context, db *gorm.DB) error {
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "20260911_knowledge_foreign_keys_v1").Error; err != nil {
+			return err
+		}
+		var cascadeCount int64
+		if err := tx.Raw(`
+			SELECT COUNT(*)
+			FROM pg_constraint
+			WHERE conname IN ('fk_knowledge_bases_documents', 'fk_messages_citations')
+				AND contype = 'f'
+				AND confdeltype = 'c'
+		`).Scan(&cascadeCount).Error; err != nil {
+			return err
+		}
+		if cascadeCount == 2 {
+			return nil
+		}
+		return tx.Exec(`
+		ALTER TABLE knowledge_documents
+		DROP CONSTRAINT IF EXISTS fk_knowledge_bases_documents;
+		ALTER TABLE knowledge_documents
+		ADD CONSTRAINT fk_knowledge_bases_documents
+		FOREIGN KEY (knowledge_base_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE;
+
+		ALTER TABLE message_citations
+		DROP CONSTRAINT IF EXISTS fk_messages_citations;
+		ALTER TABLE message_citations
+		ADD CONSTRAINT fk_messages_citations
+		FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+		`).Error
+	})
 }
 
 func ensurePaginationAndSearchIndexes(ctx context.Context, db *gorm.DB) error {
