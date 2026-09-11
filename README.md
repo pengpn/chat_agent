@@ -16,6 +16,7 @@
 - [用户数据保留与删除策略](./docs/data-retention-policy.md)
 - [RAG 第一阶段：领域模型与 pgvector 基础](./docs/rag-01-domain-and-pgvector.md)
 - [RAG 第二阶段：EmbeddingGateway 与模型适配](./docs/rag-02-embedding-gateway.md)
+- [RAG 第三阶段：文档摄取流水线](./docs/rag-03-document-ingestion.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -43,6 +44,7 @@
 - 安全附件：MinIO 对象存储、真实 MIME 校验、TXT/PDF/DOCX 提取、图片视觉输入、失败重试和权限绑定
 - RAG 数据基础：独立知识库、文档、分块和引用模型，pgvector 向量字段及用户级 Repository 权限边界
 - 独立 EmbeddingGateway：OpenAI-compatible 协议、请求前 Token 预算、批处理、受控重试、维度校验、Redis 内容哈希缓存和成本观测
+- RAG 文档摄取：知识库 CRUD、异步状态机、TXT/PDF/DOCX 结构提取、Token 分块、向量落库、幂等重试和对象删除补偿
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
@@ -53,6 +55,7 @@
 ```bash
 cp .env.example .env
 # 编辑 .env：至少设置 JWT_SECRET，并填入一个模型的 API Key
+# 使用 RAG 文档摄取时，还需启用 EMBEDDING_ENABLED 并填写 EMBEDDING_API_KEY
 docker compose up -d
 
 cd backend
@@ -102,7 +105,7 @@ frontend/src/                 # Vue 3 对话 UI
 
 Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository` 是接口，`GormUserRepository` 是实现。Service 依赖接口，因此单测仍可注入 fake 实现，而无需连接数据库。
 
-RAG 当前已完成数据基础和独立 EmbeddingGateway，但尚未开放知识库上传 API。知识库文档与对话附件拥有不同生命周期；分块向量由 pgvector 保存，查询始终带当前 `userID` 权限过滤。Embedding 调用支持 OpenAI-compatible `/embeddings`、批处理、请求前 Token 限制、数量/索引/维度校验、租户隔离的 Redis 内容哈希缓存、受控重试和成本观测。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)与 [RAG 第二阶段](./docs/rag-02-embedding-gateway.md)。
+RAG 当前已完成数据基础、EmbeddingGateway 和文档摄取流水线。知识库文档与对话附件拥有不同生命周期；上传后后台按 `extracting → chunking → embedding → ready/failed` 推进，分块向量由 pgvector 保存，查询始终带当前 `userID` 权限过滤。失败文档可重试，成功文档可重新索引；同内容重复上传不会重复调用 Embedding。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)、[RAG 第二阶段](./docs/rag-02-embedding-gateway.md)与 [RAG 第三阶段](./docs/rag-03-document-ingestion.md)。下一阶段将实现带权限过滤的 Top-K 向量检索。
 
 ## API 概览
 
@@ -133,6 +136,14 @@ RAG 当前已完成数据基础和独立 EmbeddingGateway，但尚未开放知�
 | POST | `/api/v1/conversations/:id/attachments/:attachmentId/retry` | 重试失败的文档解析 |
 | GET | `/api/v1/conversations/:id/attachments/:attachmentId/content` | 鉴权下载附件 |
 | DELETE | `/api/v1/conversations/:id/attachments/:attachmentId` | 移除尚未发送的附件 |
+| GET/POST | `/api/v1/knowledge-bases` | 列出 / 创建知识库 |
+| GET/PATCH/DELETE | `/api/v1/knowledge-bases/:baseId` | 查看 / 修改 / 删除知识库 |
+| GET/POST | `/api/v1/knowledge-bases/:baseId/documents` | 列出文档 / multipart 上传 TXT、PDF、DOCX |
+| GET/DELETE | `/api/v1/knowledge-bases/:baseId/documents/:documentId` | 查看状态 / 删除知识文档 |
+| POST | `/api/v1/knowledge-bases/:baseId/documents/:documentId/retry` | 重试失败的摄取任务 |
+| POST | `/api/v1/knowledge-bases/:baseId/documents/:documentId/reindex` | 用当前 Embedding 配置重新索引成功文档 |
+| GET | `/api/v1/knowledge-bases/:baseId/documents/:documentId/chunks` | 查看可追溯分块（不返回向量原值） |
+| GET | `/api/v1/knowledge-bases/:baseId/documents/:documentId/content` | 鉴权下载知识文档原文件 |
 | GET | `/api/v1/conversations/:id/messages` | 倒序游标分页获取消息历史 |
 | POST | `/api/v1/conversations/:id/messages` | SSE 流式发送消息 |
 | POST | `/api/v1/conversations/:id/messages/chat` | 非流式发送消息，返回完整结果 |

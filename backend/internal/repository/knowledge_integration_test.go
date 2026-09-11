@@ -58,6 +58,19 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	if err := repositories.Knowledge.CreateDocument(ctx, owner.ID, &document); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := repositories.Knowledge.BeginDocumentIngestion(ctx, other.ID, base.ID, document.ID, []string{model.KnowledgeDocumentStatusUploaded}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-user BeginDocumentIngestion() error = %v, want ErrNotFound", err)
+	}
+	ingesting, err := repositories.Knowledge.BeginDocumentIngestion(ctx, owner.ID, base.ID, document.ID, []string{model.KnowledgeDocumentStatusUploaded})
+	if err != nil || ingesting.IngestionVersion != 1 || ingesting.Status != model.KnowledgeDocumentStatusExtracting {
+		t.Fatalf("BeginDocumentIngestion() = %+v, %v", ingesting, err)
+	}
+	if err := repositories.Knowledge.AdvanceDocumentIngestion(ctx, owner.ID, document.ID, ingesting.IngestionVersion, model.KnowledgeDocumentStatusExtracting, model.KnowledgeDocumentStatusChunking, "提取后的正文"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repositories.Knowledge.AdvanceDocumentIngestion(ctx, owner.ID, document.ID, ingesting.IngestionVersion, model.KnowledgeDocumentStatusChunking, model.KnowledgeDocumentStatusEmbedding, ""); err != nil {
+		t.Fatal(err)
+	}
 
 	firstEmbedding := pgvector.NewVector([]float32{1, 0, 0})
 	secondEmbedding := pgvector.NewVector([]float32{0, 1, 0})
@@ -65,11 +78,11 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 		{ChunkIndex: 0, Content: "退款可以在七日内申请", ContentHash: fmt.Sprintf("%064d", 1), TokenCount: 10, Embedding: &firstEmbedding, EmbeddingModel: "test-embedding", EmbeddingDimension: 3},
 		{ChunkIndex: 1, Content: "企业账户支持多人协作", ContentHash: fmt.Sprintf("%064d", 2), TokenCount: 12, Embedding: &secondEmbedding, EmbeddingModel: "test-embedding", EmbeddingDimension: 3},
 	}
+	if err := repositories.Knowledge.CompleteDocumentIngestion(ctx, owner.ID, document.ID, ingesting.IngestionVersion, chunks, "test", "test-embedding", 3, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if err := repositories.Knowledge.ReplaceChunks(ctx, other.ID, document.ID, chunks); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross-user ReplaceChunks() error = %v, want ErrNotFound", err)
-	}
-	if err := repositories.Knowledge.ReplaceChunks(ctx, owner.ID, document.ID, chunks); err != nil {
-		t.Fatal(err)
 	}
 	stored, err := repositories.Knowledge.ListChunks(ctx, owner.ID, document.ID)
 	if err != nil || len(stored) != 2 || stored[0].Embedding == nil {
@@ -106,8 +119,24 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	if err := db.WithContext(ctx).Create(&citation).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := repositories.Knowledge.DeleteBase(ctx, owner.ID, base.ID); err != nil {
+	if err := repositories.Knowledge.DeleteBaseWithCleanup(ctx, owner.ID, base.ID); err != nil {
 		t.Fatal(err)
+	}
+	cleanupTasks, err := repositories.Knowledge.ListPendingObjectCleanup(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCleanup := false
+	for _, task := range cleanupTasks {
+		if task.ObjectKey == document.ObjectKey {
+			foundCleanup = true
+			if err := repositories.Knowledge.CompleteObjectCleanup(ctx, task.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !foundCleanup {
+		t.Fatal("knowledge object cleanup task was not created transactionally")
 	}
 	var preserved model.MessageCitation
 	if err := db.WithContext(ctx).First(&preserved, "id = ?", citation.ID).Error; err != nil {

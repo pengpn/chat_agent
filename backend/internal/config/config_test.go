@@ -196,6 +196,23 @@ func TestStreamConfigurationParsers(t *testing.T) {
 	}
 }
 
+func TestLoadKnowledgeConfigUsesTokenUnitsAndValidatesOverlap(t *testing.T) {
+	t.Setenv("RAG_CHUNK_TARGET_TOKENS", "600")
+	t.Setenv("RAG_CHUNK_OVERLAP_TOKENS", "90")
+	t.Setenv("RAG_CHUNK_MIN_TOKENS", "50")
+	config, err := loadKnowledgeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ChunkTargetTokens != 600 || config.ChunkOverlap != 90 || config.ChunkMinTokens != 50 {
+		t.Fatalf("unexpected knowledge config: %+v", config)
+	}
+	t.Setenv("RAG_CHUNK_OVERLAP_TOKENS", "600")
+	if _, err := loadKnowledgeConfig(); err == nil {
+		t.Fatal("expected overlap equal to target to fail")
+	}
+}
+
 func TestValidateThinkingBudgetTokens(t *testing.T) {
 	for _, value := range []int{1024, 2048, 4095} {
 		if err := validateThinkingBudgetTokens(value); err != nil {

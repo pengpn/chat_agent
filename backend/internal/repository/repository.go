@@ -190,6 +190,7 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		&model.KnowledgeDocument{},
 		&model.KnowledgeChunk{},
 		&model.MessageCitation{},
+		&model.KnowledgeObjectCleanup{},
 	); err != nil {
 		return err
 	}

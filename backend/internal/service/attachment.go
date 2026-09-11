@@ -5,20 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dslipak/pdf"
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
 	"github.com/example/agent-platform/backend/internal/objectstore"
@@ -291,63 +288,20 @@ func isDOCX(data []byte) bool {
 }
 
 func extractDocument(extension string, data []byte) (string, string, error) {
-	switch extension {
-	case ".txt":
+	// Chat attachments preserve the user's original TXT formatting. Knowledge
+	// ingestion uses the richer structured representation for chunk metadata.
+	if extension == ".txt" {
 		return string(data), "", nil
-	case ".docx":
-		reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			return "", "invalid_document", err
-		}
-		for _, file := range reader.File {
-			if file.Name != "word/document.xml" {
-				continue
-			}
-			stream, err := file.Open()
-			if err != nil {
-				return "", "invalid_document", err
-			}
-			defer stream.Close()
-			decoder := xml.NewDecoder(stream)
-			var output strings.Builder
-			for {
-				token, err := decoder.Token()
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					return "", "invalid_document", err
-				}
-				if chars, ok := token.(xml.CharData); ok {
-					output.Write(chars)
-				}
-				if element, ok := token.(xml.EndElement); ok && (element.Name.Local == "p" || element.Name.Local == "tab") {
-					output.WriteByte('\n')
-				}
-			}
-			return output.String(), "", nil
-		}
-		return "", "invalid_document", errors.New("word/document.xml missing")
-	case ".pdf":
-		reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			return "", "invalid_document", err
-		}
-		plain, err := reader.GetPlainText()
-		if err != nil {
-			return "", "invalid_document", err
-		}
-		content, err := io.ReadAll(plain)
-		if err != nil {
-			return "", "invalid_document", err
-		}
-		if strings.TrimSpace(string(content)) == "" {
-			return "", "no_extractable_text", errors.New("no extractable text")
-		}
-		return string(content), "", nil
-	default:
-		return "", "unsupported_type", ErrAttachmentTypeNotAllowed
 	}
+	document, code, err := extractStructuredDocument(extension, data)
+	if extension == ".docx" {
+		text := strings.ReplaceAll(document.Text, "\n\n", "\n")
+		if text != "" {
+			text += "\n"
+		}
+		return text, code, err
+	}
+	return document.Text, code, err
 }
 
 func uniqueStrings(values []string) []string {

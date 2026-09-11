@@ -39,6 +39,13 @@ var (
 	ErrAttachmentAlreadyUsed     = errors.New("attachment already belongs to a message")
 	ErrTooManyAttachments        = errors.New("too many attachments")
 	ErrModelDoesNotSupportVision = errors.New("model does not support image input")
+	ErrKnowledgeBaseNotFound     = errors.New("knowledge base not found")
+	ErrKnowledgeDocumentNotFound = errors.New("knowledge document not found")
+	ErrKnowledgeNameRequired     = errors.New("knowledge base name is required")
+	ErrKnowledgeNameTooLong      = errors.New("knowledge base name is too long")
+	ErrKnowledgeDescriptionLong  = errors.New("knowledge base description is too long")
+	ErrKnowledgeDocumentBusy     = errors.New("knowledge document ingestion is already running")
+	ErrEmbeddingNotConfigured    = errors.New("embedding gateway is not configured")
 	// 额度与并发准入错误：预扣失败时直接拒绝请求，不创建任何消息。
 	ErrDailyQuotaExceeded           = errors.New("daily quota exceeded")
 	ErrMonthlyQuotaExceeded         = errors.New("monthly quota exceeded")

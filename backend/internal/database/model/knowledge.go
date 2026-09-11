@@ -48,6 +48,8 @@ type KnowledgeDocument struct {
 	EmbeddingProvider  string         `json:"embeddingProvider,omitempty" gorm:"type:varchar(40);not null;default:''"`
 	EmbeddingModel     string         `json:"embeddingModel,omitempty" gorm:"type:text;not null;default:''"`
 	EmbeddingDimension int            `json:"embeddingDimension,omitempty" gorm:"not null;default:0"`
+	IngestionVersion   int64          `json:"ingestionVersion" gorm:"not null;default:0"`
+	IndexedAt          *time.Time     `json:"indexedAt,omitempty"`
 	CreatedAt          time.Time      `json:"createdAt"`
 	UpdatedAt          time.Time      `json:"updatedAt"`
 }
@@ -93,4 +95,16 @@ type MessageCitation struct {
 	Quote           string             `json:"quote" gorm:"type:text;not null"`
 	SimilarityScore float64            `json:"similarityScore" gorm:"not null;default:0"`
 	CreatedAt       time.Time          `json:"createdAt"`
+}
+
+// KnowledgeObjectCleanup is a small transactional outbox for object storage
+// deletion. The database row is committed together with the logical delete;
+// a later retry can still remove the source object if MinIO was unavailable.
+type KnowledgeObjectCleanup struct {
+	ID        string    `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
+	ObjectKey string    `json:"objectKey" gorm:"type:text;not null;uniqueIndex"`
+	Attempts  int       `json:"attempts" gorm:"not null;default:0"`
+	LastError string    `json:"lastError,omitempty" gorm:"type:text;not null;default:''"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }

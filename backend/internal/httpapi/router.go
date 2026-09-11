@@ -44,6 +44,19 @@ func (s *Server) Router() http.Handler {
 	protected.POST("/conversations/:conversationID/attachments/:attachmentID/retry", s.handlers.RetryAttachment)
 	protected.GET("/conversations/:conversationID/attachments/:attachmentID/content", s.handlers.DownloadAttachment)
 	protected.DELETE("/conversations/:conversationID/attachments/:attachmentID", s.handlers.DeleteAttachment)
+	protected.GET("/knowledge-bases", s.handlers.ListKnowledgeBases)
+	protected.POST("/knowledge-bases", s.handlers.CreateKnowledgeBase)
+	protected.GET("/knowledge-bases/:knowledgeBaseID", s.handlers.GetKnowledgeBase)
+	protected.PATCH("/knowledge-bases/:knowledgeBaseID", s.handlers.UpdateKnowledgeBase)
+	protected.DELETE("/knowledge-bases/:knowledgeBaseID", s.handlers.DeleteKnowledgeBase)
+	protected.GET("/knowledge-bases/:knowledgeBaseID/documents", s.handlers.ListKnowledgeDocuments)
+	protected.POST("/knowledge-bases/:knowledgeBaseID/documents", s.handlers.UploadKnowledgeDocument)
+	protected.GET("/knowledge-bases/:knowledgeBaseID/documents/:documentID", s.handlers.GetKnowledgeDocument)
+	protected.POST("/knowledge-bases/:knowledgeBaseID/documents/:documentID/retry", s.handlers.RetryKnowledgeDocument)
+	protected.POST("/knowledge-bases/:knowledgeBaseID/documents/:documentID/reindex", s.handlers.ReindexKnowledgeDocument)
+	protected.GET("/knowledge-bases/:knowledgeBaseID/documents/:documentID/chunks", s.handlers.ListKnowledgeChunks)
+	protected.GET("/knowledge-bases/:knowledgeBaseID/documents/:documentID/content", s.handlers.DownloadKnowledgeDocument)
+	protected.DELETE("/knowledge-bases/:knowledgeBaseID/documents/:documentID", s.handlers.DeleteKnowledgeDocument)
 
 	// 生成类接口叠加请求体大小限制和按用户限流：
 	// 限流防瞬时洪峰，额度与并发限制在 service 层准入时兼顾。

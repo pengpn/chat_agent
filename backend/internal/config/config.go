@@ -63,6 +63,18 @@ type EmbeddingConfig struct {
 	InputUSDPerMillionTokens *float64
 }
 
+// KnowledgeConfig controls the document-ingestion pipeline independently from
+// one-off chat attachments. Token values are measured by the embedding tokenizer.
+type KnowledgeConfig struct {
+	DocumentMaxBytes  int64
+	MaxTextChars      int
+	ChunkTargetTokens int64
+	ChunkOverlap      int64
+	ChunkMinTokens    int64
+	EmbeddingBatch    int
+	IngestionTimeout  time.Duration
+}
+
 type Config struct {
 	HTTPAddr                    string
 	DatabaseURL                 string
@@ -154,6 +166,7 @@ type Config struct {
 	AdminEmails                 []string
 	AlertCostThresholdNanoUSD   int64
 	Embedding                   EmbeddingConfig
+	Knowledge                   KnowledgeConfig
 	Providers                   []ProviderConfig
 }
 
@@ -379,6 +392,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	knowledge, err := loadKnowledgeConfig()
+	if err != nil {
+		return Config{}, err
+	}
 	quotaEnabled, err := boolEnv("QUOTA_ENABLED", true)
 	if err != nil {
 		return Config{}, err
@@ -434,6 +451,9 @@ func Load() (Config, error) {
 	embedding, err := loadEmbeddingConfig()
 	if err != nil {
 		return Config{}, err
+	}
+	if knowledge.EmbeddingBatch > embedding.MaxInputs {
+		return Config{}, fmt.Errorf("RAG_EMBEDDING_JOB_BATCH_SIZE must not exceed EMBEDDING_MAX_INPUTS")
 	}
 
 	providers, err := configuredProviders(streamConnectTimeout, llmTokenBudget, llmMaxOutputTokens)
@@ -532,6 +552,7 @@ func Load() (Config, error) {
 		AdminEmails:                 splitCSV(os.Getenv("ADMIN_EMAILS")),
 		AlertCostThresholdNanoUSD:   alertCostThresholdNanoUSD,
 		Embedding:                   embedding,
+		Knowledge:                   knowledge,
 		Providers:                   providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
@@ -564,6 +585,48 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func loadKnowledgeConfig() (KnowledgeConfig, error) {
+	maxBytes, err := positiveInt64Env("RAG_DOCUMENT_MAX_BYTES", 20<<20)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	maxTextChars, err := positiveIntEnv("RAG_DOCUMENT_MAX_TEXT_CHARS", 1_000_000)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	target, err := positiveInt64Env("RAG_CHUNK_TARGET_TOKENS", 500)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	overlap, err := nonNegativeInt64Env("RAG_CHUNK_OVERLAP_TOKENS", 80)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	minimum, err := positiveInt64Env("RAG_CHUNK_MIN_TOKENS", 40)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	if overlap >= target {
+		return KnowledgeConfig{}, fmt.Errorf("RAG_CHUNK_OVERLAP_TOKENS must be smaller than RAG_CHUNK_TARGET_TOKENS")
+	}
+	if minimum > target {
+		return KnowledgeConfig{}, fmt.Errorf("RAG_CHUNK_MIN_TOKENS must not exceed RAG_CHUNK_TARGET_TOKENS")
+	}
+	embeddingBatch, err := positiveIntEnv("RAG_EMBEDDING_JOB_BATCH_SIZE", 256)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	ingestionTimeout, err := positiveDurationEnv("RAG_INGESTION_TIMEOUT", "10m")
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	return KnowledgeConfig{
+		DocumentMaxBytes: maxBytes, MaxTextChars: maxTextChars,
+		ChunkTargetTokens: target, ChunkOverlap: overlap, ChunkMinTokens: minimum,
+		EmbeddingBatch: embeddingBatch, IngestionTimeout: ingestionTimeout,
+	}, nil
 }
 
 func loadEmbeddingConfig() (EmbeddingConfig, error) {

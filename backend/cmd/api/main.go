@@ -12,6 +12,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/auth"
 	"github.com/example/agent-platform/backend/internal/config"
 	"github.com/example/agent-platform/backend/internal/database"
+	"github.com/example/agent-platform/backend/internal/embeddinggateway"
 	"github.com/example/agent-platform/backend/internal/httpapi"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
@@ -94,6 +95,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer redisClient.Close()
+	embeddings, err := embeddinggateway.NewConfigured(cfg.Embedding, redisClient)
+	if err != nil {
+		logger.Error(context.Background(), "embedding gateway configuration failed", logger.Err(err))
+		os.Exit(1)
+	}
 	var limiter llmgateway.RateLimiter
 	if cfg.LLMRateTokensPerMinute > 0 {
 		limiter = llmgateway.NewTokenBucketLimiter(redisClient, cfg.LLMRateTokensPerMinute, cfg.LLMRateBurst, "")
@@ -115,7 +121,10 @@ func main() {
 	default:
 		emailSender = mailer.LogSender{}
 	}
-	server := httpapi.NewServerWithDependencies(repositories, jwtManager, providers, limiter, ratelimit.NewRedis(redisClient, ""), store, emailSender, cfg)
+	server := httpapi.NewServerWithEmbeddingGateway(repositories, jwtManager, providers, limiter, ratelimit.NewRedis(redisClient, ""), store, emailSender, embeddings, cfg)
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+	server.CleanupKnowledgeObjects(cleanupCtx)
+	cancelCleanup()
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

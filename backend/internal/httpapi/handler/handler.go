@@ -18,7 +18,12 @@ type Handler struct {
 	attachments   *service.AttachmentService
 	quotas        *service.QuotaService
 	admin         *service.AdminService
+	knowledge     *service.KnowledgeService
 	refreshCookie AuthCookieConfig
+}
+
+func (h *Handler) ConfigureKnowledge(service *service.KnowledgeService) {
+	h.knowledge = service
 }
 
 type AuthCookieConfig struct {

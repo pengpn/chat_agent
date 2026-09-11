@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"time"
 
 	"github.com/example/agent-platform/backend/internal/alerting"
 	"github.com/example/agent-platform/backend/internal/auth"
 	"github.com/example/agent-platform/backend/internal/config"
+	"github.com/example/agent-platform/backend/internal/embeddinggateway"
 	"github.com/example/agent-platform/backend/internal/httpapi/handler"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/mailer"
@@ -27,6 +29,7 @@ type Server struct {
 	jwt                *auth.JWTManager
 	auth               *service.AuthService
 	admin              *service.AdminService
+	knowledge          *service.KnowledgeService
 	authLimiter        ratelimit.Limiter
 	alerter            alerting.Alerter
 	chatRateLimit      int
@@ -50,6 +53,12 @@ func NewServerWithObjectStore(repositories *repository.Repositories, jwtManager 
 }
 
 func NewServerWithDependencies(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, llmLimiter llmgateway.RateLimiter, authLimiter ratelimit.Limiter, store objectstore.Store, emailSender mailer.Sender, cfg config.Config) *Server {
+	return NewServerWithEmbeddingGateway(repositories, jwtManager, providers, llmLimiter, authLimiter, store, emailSender, nil, cfg)
+}
+
+// NewServerWithEmbeddingGateway is the production composition root for RAG.
+// The older constructor remains available to keep focused HTTP tests simple.
+func NewServerWithEmbeddingGateway(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, llmLimiter llmgateway.RateLimiter, authLimiter ratelimit.Limiter, store objectstore.Store, emailSender mailer.Sender, embeddings embeddinggateway.Gateway, cfg config.Config) *Server {
 	streams := streamcache.New(cfg.StreamCacheTTL, cfg.StreamCacheMaxEvents)
 	userEvents := userevent.New(cfg.UserEventTTL, cfg.UserEventMaxEvents)
 	attachments := service.NewAttachment(repositories.Conversations, repositories.Attachments, store, providers, service.AttachmentConfig{
@@ -124,16 +133,35 @@ func NewServerWithDependencies(repositories *repository.Repositories, jwtManager
 		attachments,
 	)
 	handlers.ConfigureAuthCookies(handler.AuthCookieConfig{Name: cfg.RefreshCookieName, Secure: cfg.RefreshCookieSecure})
+	estimator, err := embeddinggateway.NewTokenEstimator(cfg.Embedding.Tokenizer)
+	if err != nil {
+		estimator = embeddinggateway.HeuristicTokenEstimator{}
+	}
+	knowledgeService := service.NewKnowledge(repositories.Knowledge, store, embeddings, estimator, service.KnowledgeConfig{
+		MaxBytes: cfg.Knowledge.DocumentMaxBytes, MaxTextChars: cfg.Knowledge.MaxTextChars,
+		ChunkTargetTokens: cfg.Knowledge.ChunkTargetTokens, ChunkOverlap: cfg.Knowledge.ChunkOverlap,
+		ChunkMinTokens: cfg.Knowledge.ChunkMinTokens, EmbeddingBatch: cfg.Knowledge.EmbeddingBatch,
+		IngestionTimeout: cfg.Knowledge.IngestionTimeout,
+	})
+	handlers.ConfigureKnowledge(knowledgeService)
 	return &Server{
 		handlers:           handlers,
 		jwt:                jwtManager,
 		auth:               authService,
 		admin:              adminService,
+		knowledge:          knowledgeService,
 		authLimiter:        authLimiter,
 		alerter:            alerter,
 		chatRateLimit:      cfg.ChatRateLimit,
 		chatRateLimitWin:   cfg.ChatRateLimitWindow,
 		chatBodyMaxBytes:   cfg.ChatBodyMaxBytes,
 		corsAllowedOrigins: cfg.CORSAllowedOrigins,
+	}
+}
+
+// CleanupKnowledgeObjects retries transactional object-deletion outbox tasks.
+func (s *Server) CleanupKnowledgeObjects(ctx context.Context) {
+	if s.knowledge != nil {
+		s.knowledge.DrainObjectCleanup(ctx)
 	}
 }
