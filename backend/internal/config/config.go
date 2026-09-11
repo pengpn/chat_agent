@@ -39,6 +39,30 @@ type ModelPricing struct {
 	OutputUSDPerMillionTokens float64
 }
 
+// EmbeddingConfig describes one active OpenAI-compatible embedding deployment.
+// It is intentionally independent from chat providers because embedding models
+// have different endpoints, dimensions, batching limits and pricing.
+type EmbeddingConfig struct {
+	Enabled                  bool
+	Provider                 string
+	BaseURL                  string
+	APIKey                   string
+	Model                    string
+	Dimension                int
+	SendDimensions           bool
+	Tokenizer                string
+	MaxInputs                int
+	BatchSize                int
+	MaxInputTokens           int64
+	MaxBatchTokens           int64
+	ConnectTimeout           time.Duration
+	RequestTimeout           time.Duration
+	MaxRetries               int
+	RetryBackoff             time.Duration
+	CacheTTL                 time.Duration
+	InputUSDPerMillionTokens *float64
+}
+
 type Config struct {
 	HTTPAddr                    string
 	DatabaseURL                 string
@@ -129,6 +153,7 @@ type Config struct {
 	ModerationOutputBlocklist   []string
 	AdminEmails                 []string
 	AlertCostThresholdNanoUSD   int64
+	Embedding                   EmbeddingConfig
 	Providers                   []ProviderConfig
 }
 
@@ -406,6 +431,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	embedding, err := loadEmbeddingConfig()
+	if err != nil {
+		return Config{}, err
+	}
 
 	providers, err := configuredProviders(streamConnectTimeout, llmTokenBudget, llmMaxOutputTokens)
 	if err != nil {
@@ -502,6 +531,7 @@ func Load() (Config, error) {
 		ModerationOutputBlocklist:   splitCSV(os.Getenv("MODERATION_OUTPUT_BLOCKLIST")),
 		AdminEmails:                 splitCSV(os.Getenv("ADMIN_EMAILS")),
 		AlertCostThresholdNanoUSD:   alertCostThresholdNanoUSD,
+		Embedding:                   embedding,
 		Providers:                   providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
@@ -534,6 +564,87 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func loadEmbeddingConfig() (EmbeddingConfig, error) {
+	enabled, err := boolEnv("EMBEDDING_ENABLED", false)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	dimension, err := positiveIntEnv("EMBEDDING_DIMENSION", 1536)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	sendDimensions, err := boolEnv("EMBEDDING_SEND_DIMENSIONS", true)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	maxInputs, err := positiveIntEnv("EMBEDDING_MAX_INPUTS", 2048)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	batchSize, err := positiveIntEnv("EMBEDDING_BATCH_SIZE", 64)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	if batchSize > maxInputs {
+		return EmbeddingConfig{}, fmt.Errorf("EMBEDDING_BATCH_SIZE must not exceed EMBEDDING_MAX_INPUTS")
+	}
+	maxInputTokens, err := positiveInt64Env("EMBEDDING_MAX_INPUT_TOKENS", 8191)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	maxBatchTokens, err := positiveInt64Env("EMBEDDING_MAX_BATCH_TOKENS", 100_000)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	if maxBatchTokens < maxInputTokens {
+		return EmbeddingConfig{}, fmt.Errorf("EMBEDDING_MAX_BATCH_TOKENS must be at least EMBEDDING_MAX_INPUT_TOKENS")
+	}
+	connectTimeout, err := positiveDurationEnv("EMBEDDING_CONNECT_TIMEOUT", "10s")
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	requestTimeout, err := positiveDurationEnv("EMBEDDING_REQUEST_TIMEOUT", "30s")
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	maxRetries, err := nonNegativeIntEnv("EMBEDDING_MAX_RETRIES", 2)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	if maxRetries > 3 {
+		return EmbeddingConfig{}, fmt.Errorf("EMBEDDING_MAX_RETRIES must not exceed 3")
+	}
+	retryBackoff, err := positiveDurationEnv("EMBEDDING_RETRY_BACKOFF", "300ms")
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	cacheTTL, err := positiveDurationEnv("EMBEDDING_CACHE_TTL", "720h")
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	price, err := optionalNonNegativeFloatEnv("EMBEDDING_INPUT_USD_PER_MILLION_TOKENS")
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	tokenizerName := strings.TrimSpace(env("EMBEDDING_TOKENIZER", "cl100k_base"))
+	if !supportedEmbeddingTokenizer(tokenizerName) {
+		return EmbeddingConfig{}, fmt.Errorf("EMBEDDING_TOKENIZER %q is not supported", tokenizerName)
+	}
+	config := EmbeddingConfig{
+		Enabled: enabled, Provider: strings.TrimSpace(env("EMBEDDING_PROVIDER", "openai")),
+		BaseURL: strings.TrimRight(env("EMBEDDING_BASE_URL", "https://api.openai.com/v1"), "/"),
+		APIKey:  os.Getenv("EMBEDDING_API_KEY"), Model: strings.TrimSpace(env("EMBEDDING_MODEL", "text-embedding-3-small")),
+		Dimension: dimension, SendDimensions: sendDimensions, Tokenizer: tokenizerName,
+		MaxInputs: maxInputs, BatchSize: batchSize, MaxInputTokens: maxInputTokens, MaxBatchTokens: maxBatchTokens,
+		ConnectTimeout: connectTimeout, RequestTimeout: requestTimeout, MaxRetries: maxRetries,
+		RetryBackoff: retryBackoff, CacheTTL: cacheTTL, InputUSDPerMillionTokens: price,
+	}
+	if config.Enabled && strings.TrimSpace(config.APIKey) == "" {
+		return EmbeddingConfig{}, fmt.Errorf("EMBEDDING_API_KEY is required when EMBEDDING_ENABLED=true")
+	}
+	return config, nil
 }
 
 func validateSummaryTarget(cfg Config) error {
@@ -785,6 +896,27 @@ func nonNegativeInt64Env(key string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("%s must be a non-negative integer", key)
 	}
 	return parsed, nil
+}
+
+func optionalNonNegativeFloatEnv(key string) (*float64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed < 0 {
+		return nil, fmt.Errorf("%s must be a non-negative number", key)
+	}
+	return &parsed, nil
+}
+
+func supportedEmbeddingTokenizer(name string) bool {
+	switch name {
+	case "heuristic", "o200k_base", "cl100k_base", "p50k_base", "r50k_base":
+		return true
+	default:
+		return false
+	}
 }
 
 func positiveDurationEnv(key, fallback string) (time.Duration, error) {

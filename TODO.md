@@ -139,13 +139,13 @@
 
 ### 10. EmbeddingGateway 与模型适配
 
-- [ ] 定义独立于 `LLMGateway` 的 `EmbeddingClient` / `EmbeddingGateway` 接口
-- [ ] 先接入一个 OpenAI-compatible Embedding Provider，再扩展其他供应商
-- [ ] 支持批量向量化、单批大小、输入 Token 上限、超时和受控重试
-- [ ] 请求前估算 Embedding Token，并记录 Provider、模型、维度、Token、耗时和成本
-- [ ] 校验供应商返回向量数量和维度，禁止不同维度写入同一文档版本
-- [ ] 使用内容哈希缓存相同分块的 Embedding，避免重复调用和重复计费
-- [ ] 增加 fake client 单测、错误分类测试和兼容 Provider 集成测试
+- [x] 定义独立于 `LLMGateway` 的 `EmbeddingClient` / `EmbeddingGateway` 接口
+- [x] 先接入一个 OpenAI-compatible Embedding Provider，再扩展其他供应商
+- [x] 支持批量向量化、单批大小、输入 Token 上限、超时和受控重试
+- [x] 请求前估算 Embedding Token，并记录 Provider、模型、维度、Token、耗时和成本
+- [x] 校验供应商返回向量数量和维度，禁止不同维度写入同一文档版本
+- [x] 使用内容哈希缓存相同分块的 Embedding，避免重复调用和重复计费
+- [x] 增加 fake client 单测、错误分类测试和兼容 Provider 集成测试
 
 验收标准：给定一批文本能够稳定得到数量、顺序和维度完全匹配的向量；失败不会产生半完成数据；所有调用成本可观测。
 
@@ -275,4 +275,4 @@
 
 ## 建议执行顺序
 
-下一项从“EmbeddingGateway 与模型适配”开始。RAG 基础体验完成并经过评估后，再决定是否回到 P2“多实例共享状态”。每次只选择一个可独立验收的任务，完成后勾选对应条目并提交中文 Git commit，避免同时展开多个相互依赖的大功能。
+下一项从“文档摄取流水线”开始。RAG 基础体验完成并经过评估后，再决定是否回到 P2“多实例共享状态”。每次只选择一个可独立验收的任务，完成后勾选对应条目并提交中文 Git commit，避免同时展开多个相互依赖的大功能。

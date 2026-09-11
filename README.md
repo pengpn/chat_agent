@@ -15,6 +15,7 @@
 - [完整账号生命周期实现解析](./docs/account-lifecycle.md)
 - [用户数据保留与删除策略](./docs/data-retention-policy.md)
 - [RAG 第一阶段：领域模型与 pgvector 基础](./docs/rag-01-domain-and-pgvector.md)
+- [RAG 第二阶段：EmbeddingGateway 与模型适配](./docs/rag-02-embedding-gateway.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -41,6 +42,7 @@
 - 消息与对话游标分页：最近消息优先、向上加载历史、侧栏增量加载，以及按标题或消息正文搜索
 - 安全附件：MinIO 对象存储、真实 MIME 校验、TXT/PDF/DOCX 提取、图片视觉输入、失败重试和权限绑定
 - RAG 数据基础：独立知识库、文档、分块和引用模型，pgvector 向量字段及用户级 Repository 权限边界
+- 独立 EmbeddingGateway：OpenAI-compatible 协议、请求前 Token 预算、批处理、受控重试、维度校验、Redis 内容哈希缓存和成本观测
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
@@ -91,6 +93,7 @@ backend/
   internal/mailer/            # 开发日志或 SMTP 邮件投递
   internal/ratelimit/         # Redis 账号操作频率限制
   internal/llmgateway/        # 统一模型调用入口：预算、限流、重试、幂等、观测
+  internal/embeddinggateway/  # RAG 向量生成入口：批处理、缓存、校验、成本、观测
   internal/objectstore/       # S3/MinIO 对象存储接口和实现
   internal/provider/          # 供应商协议适配器（仅由 LLMGateway 调用）
   internal/tool/              # 服务端工具定义、白名单与执行实现
@@ -99,7 +102,7 @@ frontend/src/                 # Vue 3 对话 UI
 
 Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository` 是接口，`GormUserRepository` 是实现。Service 依赖接口，因此单测仍可注入 fake 实现，而无需连接数据库。
 
-RAG 第一阶段只完成数据与持久化基础，尚未开放知识库 API，也尚未调用 Embedding 模型。知识库文档与对话附件拥有不同生命周期；分块向量由 pgvector 保存，查询始终带当前 `userID` 权限过滤。详细设计、数据关系和本地验证方式见 [RAG 第一阶段学习文档](./docs/rag-01-domain-and-pgvector.md)。
+RAG 当前已完成数据基础和独立 EmbeddingGateway，但尚未开放知识库上传 API。知识库文档与对话附件拥有不同生命周期；分块向量由 pgvector 保存，查询始终带当前 `userID` 权限过滤。Embedding 调用支持 OpenAI-compatible `/embeddings`、批处理、请求前 Token 限制、数量/索引/维度校验、租户隔离的 Redis 内容哈希缓存、受控重试和成本观测。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)与 [RAG 第二阶段](./docs/rag-02-embedding-gateway.md)。
 
 ## API 概览
 
@@ -306,9 +309,8 @@ OpenAI-compatible Provider（OpenAI、Kimi、DeepSeek、GLM）在每次请求中
 
 当前 RAG 学习路线建议按这个顺序扩展：
 
-1. 实现独立 `EmbeddingGateway`，先打通批量向量生成、维度校验、成本与缓存。
-2. 实现知识文档摄取状态机与结构感知切分。
-3. 先用 pgvector 精确检索建立正确性基线，再接入引用约束回答和前端来源面板。
-4. 建立离线评估集后，再选择性引入混合检索、Reranker 和 HNSW。
+1. 实现知识文档摄取状态机与结构感知切分，正式调用已经就绪的 `EmbeddingGateway`。
+2. 先用 pgvector 精确检索建立正确性基线，再接入引用约束回答和前端来源面板。
+3. 建立离线评估集后，再选择性引入混合检索、Reranker 和 HNSW。
 
 生产环境请使用强随机 `JWT_SECRET`、HTTPS、受限 CORS、密钥管理服务与数据库备份；目前的自动迁移适合作为学习与开发起点。

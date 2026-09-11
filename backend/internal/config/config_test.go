@@ -58,6 +58,80 @@ func TestParseModelTokenizers(t *testing.T) {
 	}
 }
 
+func TestLoadEmbeddingConfig(t *testing.T) {
+	setEmbeddingTestEnv(t)
+	t.Setenv("EMBEDDING_ENABLED", "true")
+	t.Setenv("EMBEDDING_API_KEY", "test-key")
+	t.Setenv("EMBEDDING_PROVIDER", "qwen")
+	t.Setenv("EMBEDDING_BASE_URL", "https://example.com/v1/")
+	t.Setenv("EMBEDDING_MODEL", "embedding-demo")
+	t.Setenv("EMBEDDING_DIMENSION", "1024")
+	t.Setenv("EMBEDDING_INPUT_USD_PER_MILLION_TOKENS", "0.02")
+
+	cfg, err := loadEmbeddingConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Enabled || cfg.Provider != "qwen" || cfg.BaseURL != "https://example.com/v1" || cfg.Model != "embedding-demo" || cfg.Dimension != 1024 {
+		t.Fatalf("config = %#v", cfg)
+	}
+	if cfg.InputUSDPerMillionTokens == nil || *cfg.InputUSDPerMillionTokens != 0.02 {
+		t.Fatalf("price = %#v", cfg.InputUSDPerMillionTokens)
+	}
+}
+
+func TestLoadEmbeddingConfigValidation(t *testing.T) {
+	t.Run("enabled requires API key", func(t *testing.T) {
+		setEmbeddingTestEnv(t)
+		t.Setenv("EMBEDDING_ENABLED", "true")
+		if _, err := loadEmbeddingConfig(); err == nil {
+			t.Fatal("expected missing API key to fail")
+		}
+	})
+	t.Run("batch size cannot exceed max inputs", func(t *testing.T) {
+		setEmbeddingTestEnv(t)
+		t.Setenv("EMBEDDING_MAX_INPUTS", "2")
+		t.Setenv("EMBEDDING_BATCH_SIZE", "3")
+		if _, err := loadEmbeddingConfig(); err == nil {
+			t.Fatal("expected invalid batch size to fail")
+		}
+	})
+	t.Run("tokenizer must be supported", func(t *testing.T) {
+		setEmbeddingTestEnv(t)
+		t.Setenv("EMBEDDING_TOKENIZER", "unknown")
+		if _, err := loadEmbeddingConfig(); err == nil {
+			t.Fatal("expected invalid tokenizer to fail")
+		}
+	})
+}
+
+func setEmbeddingTestEnv(t *testing.T) {
+	t.Helper()
+	values := map[string]string{
+		"EMBEDDING_ENABLED":                      "false",
+		"EMBEDDING_PROVIDER":                     "openai",
+		"EMBEDDING_BASE_URL":                     "https://api.openai.com/v1",
+		"EMBEDDING_API_KEY":                      "",
+		"EMBEDDING_MODEL":                        "text-embedding-3-small",
+		"EMBEDDING_DIMENSION":                    "1536",
+		"EMBEDDING_SEND_DIMENSIONS":              "true",
+		"EMBEDDING_TOKENIZER":                    "cl100k_base",
+		"EMBEDDING_MAX_INPUTS":                   "2048",
+		"EMBEDDING_BATCH_SIZE":                   "64",
+		"EMBEDDING_MAX_INPUT_TOKENS":             "8191",
+		"EMBEDDING_MAX_BATCH_TOKENS":             "100000",
+		"EMBEDDING_CONNECT_TIMEOUT":              "10s",
+		"EMBEDDING_REQUEST_TIMEOUT":              "30s",
+		"EMBEDDING_MAX_RETRIES":                  "2",
+		"EMBEDDING_RETRY_BACKOFF":                "300ms",
+		"EMBEDDING_CACHE_TTL":                    "720h",
+		"EMBEDDING_INPUT_USD_PER_MILLION_TOKENS": "",
+	}
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+}
+
 func TestValidateSummaryTarget(t *testing.T) {
 	provider := ProviderConfig{ID: "openai", APIKey: "key", Models: []string{"small"}}
 	valid := Config{ContextSummaryEnabled: true, ContextSummaryProvider: "openai", ContextSummaryModel: "small", Providers: []ProviderConfig{provider}}
