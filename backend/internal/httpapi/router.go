@@ -67,6 +67,7 @@ func (s *Server) Router() http.Handler {
 	generation.POST("/conversations/:conversationID/messages", s.handlers.StreamMessage)
 	generation.POST("/conversations/:conversationID/messages/:messageID/regenerate", s.handlers.RegenerateMessage)
 	generation.POST("/conversations/:conversationID/messages/:messageID/edit", s.handlers.EditMessage)
+	generation.POST("/knowledge/search", s.handlers.SearchKnowledge)
 	protected.PATCH("/conversations/:conversationID/messages/:messageID/activate", s.handlers.ActivateBranch)
 	protected.GET("/messages/:messageID/stream", s.handlers.ResumeMessageStream)
 

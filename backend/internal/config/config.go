@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -63,16 +64,22 @@ type EmbeddingConfig struct {
 	InputUSDPerMillionTokens *float64
 }
 
-// KnowledgeConfig controls the document-ingestion pipeline independently from
+// KnowledgeConfig controls document ingestion and retrieval independently from
 // one-off chat attachments. Token values are measured by the embedding tokenizer.
 type KnowledgeConfig struct {
-	DocumentMaxBytes  int64
-	MaxTextChars      int
-	ChunkTargetTokens int64
-	ChunkOverlap      int64
-	ChunkMinTokens    int64
-	EmbeddingBatch    int
-	IngestionTimeout  time.Duration
+	DocumentMaxBytes             int64
+	MaxTextChars                 int
+	ChunkTargetTokens            int64
+	ChunkOverlap                 int64
+	ChunkMinTokens               int64
+	EmbeddingBatch               int
+	IngestionTimeout             time.Duration
+	RetrievalCandidateLimit      int
+	RetrievalTopK                int
+	RetrievalSimilarityThreshold float64
+	RetrievalContextTokenBudget  int64
+	RetrievalMaxKnowledgeBases   int
+	RetrievalMaxQueryChars       int
 }
 
 type Config struct {
@@ -622,11 +629,59 @@ func loadKnowledgeConfig() (KnowledgeConfig, error) {
 	if err != nil {
 		return KnowledgeConfig{}, err
 	}
+	candidateLimit, err := positiveIntEnv("RAG_RETRIEVAL_CANDIDATE_LIMIT", 30)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	if candidateLimit > 200 {
+		return KnowledgeConfig{}, fmt.Errorf("RAG_RETRIEVAL_CANDIDATE_LIMIT must not exceed 200")
+	}
+	topK, err := positiveIntEnv("RAG_RETRIEVAL_TOP_K", 5)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	if topK > candidateLimit {
+		return KnowledgeConfig{}, fmt.Errorf("RAG_RETRIEVAL_TOP_K must not exceed RAG_RETRIEVAL_CANDIDATE_LIMIT")
+	}
+	similarityThreshold, err := floatEnv("RAG_RETRIEVAL_SIMILARITY_THRESHOLD", 0.35)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	if math.IsNaN(similarityThreshold) || math.IsInf(similarityThreshold, 0) || similarityThreshold < 0 || similarityThreshold > 1 {
+		return KnowledgeConfig{}, fmt.Errorf("RAG_RETRIEVAL_SIMILARITY_THRESHOLD must be between 0 and 1")
+	}
+	contextTokenBudget, err := positiveInt64Env("RAG_RETRIEVAL_CONTEXT_TOKEN_BUDGET", 3000)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	maxKnowledgeBases, err := positiveIntEnv("RAG_RETRIEVAL_MAX_KNOWLEDGE_BASES", 8)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	maxQueryChars, err := positiveIntEnv("RAG_RETRIEVAL_MAX_QUERY_CHARS", 4000)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
 	return KnowledgeConfig{
 		DocumentMaxBytes: maxBytes, MaxTextChars: maxTextChars,
 		ChunkTargetTokens: target, ChunkOverlap: overlap, ChunkMinTokens: minimum,
 		EmbeddingBatch: embeddingBatch, IngestionTimeout: ingestionTimeout,
+		RetrievalCandidateLimit: candidateLimit, RetrievalTopK: topK,
+		RetrievalSimilarityThreshold: similarityThreshold, RetrievalContextTokenBudget: contextTokenBudget,
+		RetrievalMaxKnowledgeBases: maxKnowledgeBases, RetrievalMaxQueryChars: maxQueryChars,
 	}, nil
+}
+
+func floatEnv(key string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return parsed, nil
 }
 
 func loadEmbeddingConfig() (EmbeddingConfig, error) {

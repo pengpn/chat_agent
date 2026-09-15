@@ -13,7 +13,6 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
@@ -92,16 +91,45 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	if err != nil || len(foreign) != 0 {
 		t.Fatalf("cross-user ListChunks() = %#v, error = %v", foreign, err)
 	}
-
-	queryVector := pgvector.NewVector([]float32{0.9, 0.1, 0})
-	var nearest model.KnowledgeChunk
-	if err := db.WithContext(ctx).Where("document_id = ?", document.ID).Clauses(clause.OrderBy{
-		Expression: clause.Expr{SQL: "embedding <=> ?", Vars: []any{queryVector}},
-	}).First(&nearest).Error; err != nil {
+	equalQuery := pgvector.NewVector([]float32{1, 1, 0})
+	equalRows, err := repositories.Knowledge.SearchChunksExact(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 3, 10, equalQuery)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if nearest.ChunkIndex != 0 {
-		t.Fatalf("nearest chunk index = %d, want 0", nearest.ChunkIndex)
+	if len(equalRows) != 2 || equalRows[0].ChunkIndex != 0 || equalRows[1].ChunkIndex != 1 {
+		t.Fatalf("same-score search is not stable: %+v", equalRows)
+	}
+	crossUserRows, err := repositories.Knowledge.SearchChunksExact(ctx, other.ID, []string{base.ID}, "test", "test-embedding", 3, 10, equalQuery)
+	if err != nil || len(crossUserRows) != 0 {
+		t.Fatalf("cross-user search = %+v, error = %v", crossUserRows, err)
+	}
+	differentDimension := pgvector.NewVector([]float32{1, 1, 0, 0})
+	dimensionRows, err := repositories.Knowledge.SearchChunksExact(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 4, 10, differentDimension)
+	if err != nil || len(dimensionRows) != 0 {
+		t.Fatalf("dimension-mismatched search = %+v, error = %v", dimensionRows, err)
+	}
+	modelRows, err := repositories.Knowledge.SearchChunksExact(ctx, owner.ID, []string{base.ID}, "test", "another-embedding", 3, 10, equalQuery)
+	if err != nil || len(modelRows) != 0 {
+		t.Fatalf("model-mismatched search = %+v, error = %v", modelRows, err)
+	}
+	if err := db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", document.ID).Update("status", model.KnowledgeDocumentStatusFailed).Error; err != nil {
+		t.Fatal(err)
+	}
+	notReadyRows, err := repositories.Knowledge.SearchChunksExact(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 3, 10, equalQuery)
+	if err != nil || len(notReadyRows) != 0 {
+		t.Fatalf("not-ready document leaked into search: %+v, error = %v", notReadyRows, err)
+	}
+	if err := db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", document.ID).Update("status", model.KnowledgeDocumentStatusReady).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	queryVector := pgvector.NewVector([]float32{0.9, 0.1, 0})
+	nearestRows, err := repositories.Knowledge.SearchChunksExact(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 3, 1, queryVector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nearestRows) != 1 || nearestRows[0].ChunkIndex != 0 {
+		t.Fatalf("nearest chunks = %+v, want chunk index 0", nearestRows)
 	}
 
 	conversation := model.Conversation{UserID: owner.ID, Title: "引用测试", TitleStatus: "manual"}
@@ -154,5 +182,64 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	}
 	if citationCount != 0 {
 		t.Fatalf("citation count after deleting message = %d, want 0", citationCount)
+	}
+}
+
+func TestPostgresKnowledgeExactSearchLargeDataset(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	repositories := New(db)
+	suffix := time.Now().UnixNano()
+	user := model.User{Email: fmt.Sprintf("knowledge-large-%d@example.com", suffix), PasswordHash: "test-only", DisplayName: "Large Search"}
+	if err := repositories.Users.Create(ctx, &user); err != nil {
+		t.Fatal(err)
+	}
+	defer db.WithContext(ctx).Delete(&user)
+	base := model.KnowledgeBase{Name: "大数据检索基线"}
+	if err := repositories.Knowledge.CreateBase(ctx, user.ID, &base); err != nil {
+		t.Fatal(err)
+	}
+	document := model.KnowledgeDocument{
+		KnowledgeBaseID: base.ID, ObjectKey: fmt.Sprintf("knowledge/large-%d.txt", suffix),
+		OriginalName: "large.txt", Extension: ".txt", MIMEType: "text/plain", Size: 1,
+		Checksum: fmt.Sprintf("%064x", suffix), Status: model.KnowledgeDocumentStatusReady,
+		EmbeddingProvider: "test", EmbeddingModel: "test-embedding", EmbeddingDimension: 3,
+	}
+	if err := repositories.Knowledge.CreateDocument(ctx, user.ID, &document); err != nil {
+		t.Fatal(err)
+	}
+	chunks := make([]model.KnowledgeChunk, 1000)
+	for index := range chunks {
+		values := []float32{0, 1, 0}
+		if index == 0 {
+			values = []float32{1, 0, 0}
+		}
+		vector := pgvector.NewVector(values)
+		chunks[index] = model.KnowledgeChunk{
+			DocumentID: document.ID, ChunkIndex: index, Content: fmt.Sprintf("chunk-%04d", index),
+			ContentHash: fmt.Sprintf("%064x", index+1), TokenCount: 4,
+			Embedding: &vector, EmbeddingModel: "test-embedding", EmbeddingDimension: 3,
+		}
+	}
+	if err := db.WithContext(ctx).CreateInBatches(&chunks, 100).Error; err != nil {
+		t.Fatal(err)
+	}
+	query := pgvector.NewVector([]float32{1, 0, 0})
+	rows, err := repositories.Knowledge.SearchChunksExact(ctx, user.ID, []string{base.ID}, "test", "test-embedding", 3, 20, query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 20 || rows[0].ChunkIndex != 0 {
+		t.Fatalf("large exact search returned %d rows, first=%+v", len(rows), rows[0])
 	}
 }

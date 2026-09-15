@@ -19,11 +19,16 @@ type Handler struct {
 	quotas        *service.QuotaService
 	admin         *service.AdminService
 	knowledge     *service.KnowledgeService
+	retrieval     *service.KnowledgeRetrievalService
 	refreshCookie AuthCookieConfig
 }
 
 func (h *Handler) ConfigureKnowledge(service *service.KnowledgeService) {
 	h.knowledge = service
+}
+
+func (h *Handler) ConfigureKnowledgeRetrieval(service *service.KnowledgeRetrievalService) {
+	h.retrieval = service
 }
 
 type AuthCookieConfig struct {

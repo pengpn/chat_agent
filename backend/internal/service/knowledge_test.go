@@ -14,11 +14,14 @@ import (
 	"github.com/example/agent-platform/backend/internal/domain"
 	"github.com/example/agent-platform/backend/internal/embeddinggateway"
 	"github.com/example/agent-platform/backend/internal/objectstore"
+	"github.com/example/agent-platform/backend/internal/repository"
+	pgvector "github.com/pgvector/pgvector-go"
 )
 
 type fakeEmbeddingGateway struct {
-	mu    sync.Mutex
-	calls int
+	mu         sync.Mutex
+	calls      int
+	queryCalls int
 }
 
 func (f *fakeEmbeddingGateway) EmbedDocuments(_ context.Context, request embeddinggateway.Request) (embeddinggateway.Result, error) {
@@ -33,15 +36,28 @@ func (f *fakeEmbeddingGateway) EmbedDocuments(_ context.Context, request embeddi
 }
 
 func (f *fakeEmbeddingGateway) EmbedQuery(context.Context, embeddinggateway.Request) (embeddinggateway.Result, error) {
-	return embeddinggateway.Result{}, nil
+	f.mu.Lock()
+	f.queryCalls++
+	f.mu.Unlock()
+	return embeddinggateway.Result{
+		Provider: "test", Model: "embedding-v1", Dimension: 3,
+		Vectors: []embeddinggateway.Vector{{Index: 0, Values: []float32{1, 0, 0}}},
+	}, nil
 }
 
 type fakeKnowledgeRepository struct {
-	mu        sync.Mutex
-	base      model.KnowledgeBase
-	documents map[string]model.KnowledgeDocument
-	chunks    map[string][]model.KnowledgeChunk
-	cleanups  []model.KnowledgeObjectCleanup
+	mu         sync.Mutex
+	base       model.KnowledgeBase
+	documents  map[string]model.KnowledgeDocument
+	chunks     map[string][]model.KnowledgeChunk
+	cleanups   []model.KnowledgeObjectCleanup
+	searchRows []repository.KnowledgeSearchRow
+	lastSearch struct {
+		provider  string
+		model     string
+		dimension int
+		limit     int
+	}
 }
 
 func newFakeKnowledgeRepository() *fakeKnowledgeRepository {
@@ -205,6 +221,31 @@ func (r *fakeKnowledgeRepository) ListChunks(_ context.Context, userID, document
 		return nil, nil
 	}
 	return r.chunks[documentID], nil
+}
+func (r *fakeKnowledgeRepository) CountOwnedBases(_ context.Context, userID string, baseIDs []string) (int64, error) {
+	if userID != r.base.UserID {
+		return 0, nil
+	}
+	var count int64
+	for _, id := range baseIDs {
+		if id == r.base.ID {
+			count++
+		}
+	}
+	return count, nil
+}
+func (r *fakeKnowledgeRepository) SearchChunksExact(_ context.Context, userID string, baseIDs []string, providerName, embeddingModel string, dimension, limit int, _ pgvector.Vector) ([]repository.KnowledgeSearchRow, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastSearch.provider, r.lastSearch.model, r.lastSearch.dimension, r.lastSearch.limit = providerName, embeddingModel, dimension, limit
+	if userID != r.base.UserID || len(baseIDs) != 1 || baseIDs[0] != r.base.ID {
+		return []repository.KnowledgeSearchRow{}, nil
+	}
+	end := len(r.searchRows)
+	if end > limit {
+		end = limit
+	}
+	return append([]repository.KnowledgeSearchRow(nil), r.searchRows[:end]...), nil
 }
 
 func TestKnowledgeUploadIsIdempotentAndPersistsReadyChunks(t *testing.T) {

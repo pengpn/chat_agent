@@ -46,6 +46,12 @@ var (
 	ErrKnowledgeDescriptionLong  = errors.New("knowledge base description is too long")
 	ErrKnowledgeDocumentBusy     = errors.New("knowledge document ingestion is already running")
 	ErrEmbeddingNotConfigured    = errors.New("embedding gateway is not configured")
+	ErrKnowledgeQueryRequired    = errors.New("knowledge query is required")
+	ErrKnowledgeQueryTooLong     = errors.New("knowledge query is too long")
+	ErrKnowledgeBasesRequired    = errors.New("at least one knowledge base is required")
+	ErrTooManyKnowledgeBases     = errors.New("too many knowledge bases selected")
+	ErrInvalidKnowledgeBaseID    = errors.New("invalid knowledge base id")
+	ErrKnowledgeRetrievalFailed  = errors.New("knowledge retrieval failed")
 	// 额度与并发准入错误：预扣失败时直接拒绝请求，不创建任何消息。
 	ErrDailyQuotaExceeded           = errors.New("daily quota exceeded")
 	ErrMonthlyQuotaExceeded         = errors.New("monthly quota exceeded")

@@ -7,9 +7,28 @@ import (
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
+	pgvector "github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// KnowledgeSearchRow is a read model for exact vector retrieval. It contains
+// source metadata needed by later citation generation, but never exposes the
+// raw embedding vector to the HTTP layer.
+type KnowledgeSearchRow struct {
+	KnowledgeBaseID string
+	DocumentID      string
+	DocumentName    string
+	ChunkID         string
+	ChunkIndex      int
+	Content         string
+	ContentHash     string
+	TokenCount      int64
+	PageNumber      *int
+	SectionTitle    string
+	Metadata        model.JSONDocument
+	Similarity      float64
+}
 
 // KnowledgeRepository is the persistence boundary for user-owned knowledge.
 // Every read and mutation receives userID so callers cannot access records by
@@ -35,6 +54,8 @@ type KnowledgeRepository interface {
 	FailObjectCleanup(ctx context.Context, id, message string) error
 	ReplaceChunks(ctx context.Context, userID, documentID string, chunks []model.KnowledgeChunk) error
 	ListChunks(ctx context.Context, userID, documentID string) ([]model.KnowledgeChunk, error)
+	CountOwnedBases(ctx context.Context, userID string, baseIDs []string) (int64, error)
+	SearchChunksExact(ctx context.Context, userID string, baseIDs []string, providerName, embeddingModel string, dimension, limit int, query pgvector.Vector) ([]KnowledgeSearchRow, error)
 }
 
 type GormKnowledgeRepository struct{ db *gorm.DB }
@@ -331,6 +352,63 @@ func (r *GormKnowledgeRepository) ListChunks(ctx context.Context, userID, docume
 		Joins("JOIN knowledge_bases ON knowledge_bases.id = knowledge_documents.knowledge_base_id").
 		Where("knowledge_chunks.document_id = ? AND knowledge_bases.user_id = ?", documentID, userID).
 		Order("knowledge_chunks.chunk_index ASC").Find(&items).Error
+	return items, err
+}
+
+func (r *GormKnowledgeRepository) CountOwnedBases(ctx context.Context, userID string, baseIDs []string) (int64, error) {
+	if len(baseIDs) == 0 {
+		return 0, nil
+	}
+	var count int64
+	err := r.db.WithContext(ctx).Model(&model.KnowledgeBase{}).
+		Where("user_id = ? AND id IN ?", userID, baseIDs).
+		Distinct("id").Count(&count).Error
+	return count, err
+}
+
+// SearchChunksExact deliberately uses a sequential exact cosine-distance
+// ranking as the correctness baseline. An approximate HNSW index can be added
+// only after recall and latency measurements justify that trade-off.
+func (r *GormKnowledgeRepository) SearchChunksExact(ctx context.Context, userID string, baseIDs []string, providerName, embeddingModel string, dimension, limit int, query pgvector.Vector) ([]KnowledgeSearchRow, error) {
+	if len(baseIDs) == 0 || limit <= 0 {
+		return []KnowledgeSearchRow{}, nil
+	}
+	items := make([]KnowledgeSearchRow, 0, limit)
+	err := r.db.WithContext(ctx).Raw(`
+		WITH query_vector AS (SELECT ?::vector AS embedding)
+		SELECT
+			knowledge_documents.knowledge_base_id,
+			knowledge_chunks.document_id,
+			knowledge_documents.original_name AS document_name,
+			knowledge_chunks.id AS chunk_id,
+			knowledge_chunks.chunk_index,
+			knowledge_chunks.content,
+			knowledge_chunks.content_hash,
+			knowledge_chunks.token_count,
+			knowledge_chunks.page_number,
+			knowledge_chunks.section_title,
+			knowledge_chunks.metadata,
+			1 - (knowledge_chunks.embedding <=> query_vector.embedding) AS similarity
+		FROM knowledge_chunks
+		JOIN knowledge_documents ON knowledge_documents.id = knowledge_chunks.document_id
+		JOIN knowledge_bases ON knowledge_bases.id = knowledge_documents.knowledge_base_id
+		CROSS JOIN query_vector
+		WHERE knowledge_bases.user_id = ?
+			AND knowledge_documents.knowledge_base_id IN ?
+			AND knowledge_documents.status = ?
+			AND knowledge_documents.embedding_provider = ?
+			AND knowledge_documents.embedding_model = ?
+			AND knowledge_documents.embedding_dimension = ?
+			AND knowledge_chunks.embedding IS NOT NULL
+			AND knowledge_chunks.embedding_model = ?
+			AND knowledge_chunks.embedding_dimension = ?
+		ORDER BY
+			knowledge_chunks.embedding <=> query_vector.embedding ASC,
+			knowledge_chunks.document_id ASC,
+			knowledge_chunks.chunk_index ASC,
+			knowledge_chunks.id ASC
+		LIMIT ?
+	`, query, userID, baseIDs, model.KnowledgeDocumentStatusReady, providerName, embeddingModel, dimension, embeddingModel, dimension, limit).Scan(&items).Error
 	return items, err
 }
 

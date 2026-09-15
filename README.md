@@ -17,6 +17,7 @@
 - [RAG 第一阶段：领域模型与 pgvector 基础](./docs/rag-01-domain-and-pgvector.md)
 - [RAG 第二阶段：EmbeddingGateway 与模型适配](./docs/rag-02-embedding-gateway.md)
 - [RAG 第三阶段：文档摄取流水线](./docs/rag-03-document-ingestion.md)
+- [RAG 第四阶段：权限过滤的向量检索](./docs/rag-04-permission-filtered-vector-retrieval.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -45,6 +46,7 @@
 - RAG 数据基础：独立知识库、文档、分块和引用模型，pgvector 向量字段及用户级 Repository 权限边界
 - 独立 EmbeddingGateway：OpenAI-compatible 协议、请求前 Token 预算、批处理、受控重试、维度校验、Redis 内容哈希缓存和成本观测
 - RAG 文档摄取：知识库 CRUD、异步状态机、TXT/PDF/DOCX 结构提取、Token 分块、向量落库、幂等重试和对象删除补偿
+- RAG 精确向量检索：查询向量化、用户/知识库权限过滤、模型版本匹配、余弦 Top-K、相关性阈值和上下文 Token 预算
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
@@ -105,7 +107,7 @@ frontend/src/                 # Vue 3 对话 UI
 
 Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository` 是接口，`GormUserRepository` 是实现。Service 依赖接口，因此单测仍可注入 fake 实现，而无需连接数据库。
 
-RAG 当前已完成数据基础、EmbeddingGateway 和文档摄取流水线。知识库文档与对话附件拥有不同生命周期；上传后后台按 `extracting → chunking → embedding → ready/failed` 推进，分块向量由 pgvector 保存，查询始终带当前 `userID` 权限过滤。失败文档可重试，成功文档可重新索引；同内容重复上传不会重复调用 Embedding。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)、[RAG 第二阶段](./docs/rag-02-embedding-gateway.md)与 [RAG 第三阶段](./docs/rag-03-document-ingestion.md)。下一阶段将实现带权限过滤的 Top-K 向量检索。
+RAG 当前已完成数据基础、EmbeddingGateway、文档摄取和权限过滤的精确向量检索。知识库文档与对话附件拥有不同生命周期；上传后后台按 `extracting → chunking → embedding → ready/failed` 推进，分块向量由 pgvector 保存。检索前先校验全部知识库归属，再对问题生成向量；SQL 同时过滤当前用户、选中的知识库、就绪状态、Provider、模型和维度，并按余弦相似度稳定排序。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)、[RAG 第二阶段](./docs/rag-02-embedding-gateway.md)、[RAG 第三阶段](./docs/rag-03-document-ingestion.md)与 [RAG 第四阶段](./docs/rag-04-permission-filtered-vector-retrieval.md)。下一阶段会把检索证据接入对话生成并持久化引用快照。
 
 ## API 概览
 
@@ -144,6 +146,7 @@ RAG 当前已完成数据基础、EmbeddingGateway 和文档摄取流水线。�
 | POST | `/api/v1/knowledge-bases/:baseId/documents/:documentId/reindex` | 用当前 Embedding 配置重新索引成功文档 |
 | GET | `/api/v1/knowledge-bases/:baseId/documents/:documentId/chunks` | 查看可追溯分块（不返回向量原值） |
 | GET | `/api/v1/knowledge-bases/:baseId/documents/:documentId/content` | 鉴权下载知识文档原文件 |
+| POST | `/api/v1/knowledge/search` | 在当前用户选择的知识库中执行精确向量检索 |
 | GET | `/api/v1/conversations/:id/messages` | 倒序游标分页获取消息历史 |
 | POST | `/api/v1/conversations/:id/messages` | SSE 流式发送消息 |
 | POST | `/api/v1/conversations/:id/messages/chat` | 非流式发送消息，返回完整结果 |

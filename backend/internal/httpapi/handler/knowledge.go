@@ -158,6 +158,19 @@ func (h *Handler) DeleteKnowledgeDocument(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (h *Handler) SearchKnowledge(c *gin.Context) {
+	var input service.KnowledgeRetrievalRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.WriteErrorResp(c, http.StatusBadRequest, "请求格式不正确")
+		return
+	}
+	result, err := h.retrieval.Search(c.Request.Context(), currentUserID(c), input)
+	if h.writeKnowledgeError(c, err) {
+		return
+	}
+	response.WriteOKResp(c, result)
+}
+
 func (h *Handler) writeKnowledgeError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
@@ -177,6 +190,19 @@ func (h *Handler) writeKnowledgeError(c *gin.Context, err error) bool {
 		response.WriteErrorResp(c, http.StatusConflict, "文档当前状态不允许此操作")
 	case errors.Is(err, service.ErrEmbeddingNotConfigured):
 		response.WriteErrorResp(c, http.StatusServiceUnavailable, "Embedding 服务尚未配置")
+	case errors.Is(err, service.ErrKnowledgeQueryRequired):
+		response.WriteErrorResp(c, http.StatusBadRequest, "检索问题不能为空")
+	case errors.Is(err, service.ErrKnowledgeQueryTooLong):
+		response.WriteErrorResp(c, http.StatusBadRequest, "检索问题超过允许长度")
+	case errors.Is(err, service.ErrKnowledgeBasesRequired):
+		response.WriteErrorResp(c, http.StatusBadRequest, "请至少选择一个知识库")
+	case errors.Is(err, service.ErrTooManyKnowledgeBases):
+		response.WriteErrorResp(c, http.StatusBadRequest, "选择的知识库数量超过限制")
+	case errors.Is(err, service.ErrInvalidKnowledgeBaseID):
+		response.WriteErrorResp(c, http.StatusBadRequest, "知识库 ID 格式不正确")
+	case errors.Is(err, service.ErrKnowledgeRetrievalFailed):
+		logger.Warn(c.Request.Context(), "knowledge retrieval unavailable", logger.Err(err))
+		response.WriteErrorResp(c, http.StatusBadGateway, "知识库检索暂时不可用")
 	case errors.Is(err, service.ErrAttachmentTooLarge):
 		response.WriteErrorResp(c, http.StatusRequestEntityTooLarge, "文件超过允许的大小")
 	case errors.Is(err, service.ErrAttachmentEmpty):

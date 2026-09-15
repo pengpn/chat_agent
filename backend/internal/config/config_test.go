@@ -213,6 +213,28 @@ func TestLoadKnowledgeConfigUsesTokenUnitsAndValidatesOverlap(t *testing.T) {
 	}
 }
 
+func TestLoadKnowledgeRetrievalConfigValidation(t *testing.T) {
+	t.Setenv("RAG_RETRIEVAL_CANDIDATE_LIMIT", "20")
+	t.Setenv("RAG_RETRIEVAL_TOP_K", "6")
+	t.Setenv("RAG_RETRIEVAL_SIMILARITY_THRESHOLD", "0.42")
+	config, err := loadKnowledgeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.RetrievalCandidateLimit != 20 || config.RetrievalTopK != 6 || config.RetrievalSimilarityThreshold != 0.42 {
+		t.Fatalf("unexpected retrieval config: %+v", config)
+	}
+	t.Setenv("RAG_RETRIEVAL_TOP_K", "21")
+	if _, err := loadKnowledgeConfig(); err == nil {
+		t.Fatal("expected top-k greater than candidate limit to fail")
+	}
+	t.Setenv("RAG_RETRIEVAL_TOP_K", "6")
+	t.Setenv("RAG_RETRIEVAL_SIMILARITY_THRESHOLD", "1.1")
+	if _, err := loadKnowledgeConfig(); err == nil {
+		t.Fatal("expected similarity threshold above one to fail")
+	}
+}
+
 func TestValidateThinkingBudgetTokens(t *testing.T) {
 	for _, value := range []int{1024, 2048, 4095} {
 		if err := validateThinkingBudgetTokens(value); err != nil {
