@@ -31,6 +31,7 @@ type ChatService struct {
 	stream        StreamConfig
 	context       ContextConfig
 	attachments   *AttachmentService
+	retrieval     KnowledgeRetriever
 	// 准入与安全依赖，由 ConfigureSafety 注入，保持 nil 时行为不变。
 	quotas           *QuotaService
 	moderator        moderation.Moderator
@@ -58,12 +59,13 @@ type ContextConfig struct {
 }
 
 type ChatInput struct {
-	Content       string
-	Provider      string
-	Model         string
-	Temperature   *float64
-	OutputFormat  string
-	AttachmentIDs []string
+	Content          string
+	Provider         string
+	Model            string
+	Temperature      *float64
+	OutputFormat     string
+	AttachmentIDs    []string
+	KnowledgeBaseIDs []string
 	// IdempotencyKey comes from the HTTP Idempotency-Key header. It scopes one
 	// complete business message rather than individual model retries.
 	IdempotencyKey string
@@ -84,6 +86,7 @@ type ChatSession struct {
 	preparationCostNanoUSD   int64
 	preparationCostKnown     bool
 	preparationCostTracked   bool
+	groundingMatches         []KnowledgeRetrievalMatch
 	// quotaReservedTokens 是本次请求预扣的估算 Token；
 	// 请求结束时必须结算或补偿，0 表示未预扣。
 	quotaReservedTokens int64
@@ -151,6 +154,13 @@ func (s *ChatService) ConfigureSafety(deps SafetyDependencies) {
 	}
 }
 
+// ConfigureKnowledgeRetrieval enables server-side RAG for chat requests that
+// carry knowledge base IDs. Raw retrieved content is never accepted from the
+// client.
+func (s *ChatService) ConfigureKnowledgeRetrieval(retrieval KnowledgeRetriever) {
+	s.retrieval = retrieval
+}
+
 func (s *ChatService) messageLimit() int {
 	if s.maxMessageChars > 0 {
 		return s.maxMessageChars
@@ -215,10 +225,11 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 		OperationID: operationID,
 		UserID:      userID,
 		UserMessage: model.Message{
-			ConversationID: conversationID,
-			Role:           "user",
-			Content:        input.Content,
-			Status:         "complete",
+			ConversationID:   conversationID,
+			Role:             "user",
+			Content:          input.Content,
+			Status:           "complete",
+			KnowledgeBaseIDs: model.JSONStringArray(uniqueStrings(input.KnowledgeBaseIDs)),
 		},
 		AssistantMessage: model.Message{
 			ConversationID: conversationID,
@@ -231,6 +242,16 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	if branch := selectedBranch(history); len(branch) > 0 {
 		parentID := branch[len(branch)-1].ID
 		session.UserMessage.ParentMessageID = &parentID
+	}
+	requestMessages := make([]provider.Message, 0, 3)
+	if system := strings.TrimSpace(s.systemPrompt); system != "" {
+		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
+	}
+	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + preparedAttachments.DocumentText, Parts: preparedAttachments.Parts})
+	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
+	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, input.KnowledgeBaseIDs, &request); err != nil {
+		s.gateway.Abandon(operationID)
+		return nil, err
 	}
 	var createErr error
 	if len(input.AttachmentIDs) > 0 {
@@ -257,12 +278,6 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	}
 	session.UserMessage.Attachments = preparedAttachments.Items
 
-	requestMessages := make([]provider.Message, 0, 2)
-	if system := strings.TrimSpace(s.systemPrompt); system != "" {
-		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
-	}
-	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + preparedAttachments.DocumentText, Parts: preparedAttachments.Parts})
-	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
 		request.Tools = s.tools.Definitions()
 	}
@@ -408,6 +423,16 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 			return nil, err
 		}
 	}
+	requestMessages := make([]provider.Message, 0, 3)
+	if system := strings.TrimSpace(s.systemPrompt); system != "" {
+		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
+	}
+	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + regeneratedAttachments.DocumentText, Parts: regeneratedAttachments.Parts})
+	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
+	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, []string(session.UserMessage.KnowledgeBaseIDs), &request); err != nil {
+		s.gateway.Abandon(operationID)
+		return nil, err
+	}
 	if err := s.repository.CreateRegeneration(ctx, userID, targetMessageID, replyToID, &session.AssistantMessage); err != nil {
 		s.gateway.Abandon(operationID)
 		if errors.Is(err, domain.ErrAlreadyExists) {
@@ -419,12 +444,6 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 		return nil, err
 	}
 
-	requestMessages := make([]provider.Message, 0, 2)
-	if system := strings.TrimSpace(s.systemPrompt); system != "" {
-		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
-	}
-	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + regeneratedAttachments.DocumentText, Parts: regeneratedAttachments.Parts})
-	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
 		request.Tools = s.tools.Definitions()
 	}
@@ -521,6 +540,10 @@ func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, t
 	if messageIndex(history, target.ID) < 0 {
 		return nil, ErrMessageNotFound
 	}
+	knowledgeBaseIDs := input.KnowledgeBaseIDs
+	if knowledgeBaseIDs == nil {
+		knowledgeBaseIDs = []string(target.KnowledgeBaseIDs)
+	}
 	operationID := llmgateway.OperationID(userID, conversationID+":edit:"+targetMessageID, strings.TrimSpace(input.IdempotencyKey))
 	if err := s.gateway.Begin(ctx, operationID); err != nil {
 		return nil, err
@@ -533,11 +556,12 @@ func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, t
 		OperationID: operationID,
 		UserID:      userID,
 		UserMessage: model.Message{
-			ConversationID:  conversationID,
-			Role:            "user",
-			Content:         input.Content,
-			Status:          "complete",
-			ParentMessageID: target.ParentMessageID,
+			ConversationID:   conversationID,
+			Role:             "user",
+			Content:          input.Content,
+			Status:           "complete",
+			ParentMessageID:  target.ParentMessageID,
+			KnowledgeBaseIDs: model.JSONStringArray(uniqueStrings(knowledgeBaseIDs)),
 		},
 		AssistantMessage: model.Message{
 			ConversationID: conversationID,
@@ -550,6 +574,16 @@ func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, t
 		IsEdit:                true,
 		ContextIsExplicitPath: true,
 	}
+	requestMessages := make([]provider.Message, 0, 3)
+	if system := strings.TrimSpace(s.systemPrompt); system != "" {
+		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
+	}
+	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
+	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
+	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, knowledgeBaseIDs, &request); err != nil {
+		s.gateway.Abandon(operationID)
+		return nil, err
+	}
 	if err := s.repository.CreateEditedTurn(ctx, userID, targetMessageID, &session.UserMessage, &session.AssistantMessage); err != nil {
 		s.gateway.Abandon(operationID)
 		if errors.Is(err, domain.ErrAlreadyExists) {
@@ -561,12 +595,6 @@ func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, t
 		return nil, err
 	}
 
-	requestMessages := make([]provider.Message, 0, 2)
-	if system := strings.TrimSpace(s.systemPrompt); system != "" {
-		requestMessages = append(requestMessages, provider.Message{Role: "system", Content: system})
-	}
-	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
-	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
 		request.Tools = s.tools.Definitions()
 	}
@@ -713,6 +741,13 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		finishReason = "stop"
 	}
 	s.moderateOutput(ctx, session, &answer, &think, &structuredOutput, &status, &finishReason)
+	var citations []model.MessageCitation
+	if len(session.UserMessage.KnowledgeBaseIDs) > 0 {
+		filtered, validated := validatedCitations(answer.String(), session.groundingMatches)
+		answer.Reset()
+		answer.WriteString(filtered)
+		citations = validated
+	}
 	usageData := model.MessageUsage{
 		InputTokens:   usage.InputTokens,
 		OutputTokens:  usage.OutputTokens,
@@ -724,6 +759,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 	s.alertCostAnomaly(ctx, session, usageData)
 	completed, err := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
 		Content: answer.String(), Think: think.String(), StructuredOutput: model.JSONDocument(structuredOutput), Status: status, FinishReason: finishReason, Usage: usageData,
+		Citations: citations,
 	})
 	if err != nil {
 		s.gateway.Abandon(session.OperationID)
@@ -907,6 +943,13 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 		finishReason = status
 	}
 	s.moderateOutput(ctx, session, &answer, &think, &structuredOutput, &status, &finishReason)
+	var citations []model.MessageCitation
+	if len(session.UserMessage.KnowledgeBaseIDs) > 0 {
+		filtered, validated := validatedCitations(answer.String(), session.groundingMatches)
+		answer.Reset()
+		answer.WriteString(filtered)
+		citations = validated
+	}
 	usageData := model.MessageUsage{
 		InputTokens:   usage.InputTokens,
 		OutputTokens:  usage.OutputTokens,
@@ -918,6 +961,7 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 	s.alertCostAnomaly(ctx, session, usageData)
 	completed, finalizeErr := s.finalize(session.AssistantMessage.ID, model.MessageCompletion{
 		Content: answer.String(), Think: think.String(), StructuredOutput: model.JSONDocument(structuredOutput), Status: status, FinishReason: finishReason, Usage: usageData,
+		Citations: citations,
 	})
 	if finalizeErr != nil {
 		s.gateway.Abandon(session.OperationID)

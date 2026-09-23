@@ -305,7 +305,7 @@ func (r *GormAuthRepository) ExportAccount(ctx context.Context, userID string, n
 		{&result.KnowledgeBases, r.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at ASC")},
 		{&result.KnowledgeDocuments, r.db.WithContext(ctx).Where("knowledge_base_id IN (?)", r.db.Model(&model.KnowledgeBase{}).Select("id").Where("user_id = ?", userID)).Order("created_at ASC")},
 		{&result.KnowledgeChunks, r.db.WithContext(ctx).Where("document_id IN (?)", r.db.Model(&model.KnowledgeDocument{}).Select("id").Where("knowledge_base_id IN (?)", r.db.Model(&model.KnowledgeBase{}).Select("id").Where("user_id = ?", userID))).Order("created_at ASC")},
-		{&result.MessageCitations, r.db.WithContext(ctx).Where("message_id IN (?)", r.db.Model(&model.Message{}).Select("id").Where("conversation_id IN (?)", r.db.Model(&model.Conversation{}).Select("id").Where("user_id = ?", userID))).Order("created_at ASC")},
+		{&result.MessageCitations, r.db.WithContext(ctx).Where("message_id IN (?)", r.db.Model(&model.Message{}).Select("id").Where("conversation_id IN (?)", r.db.Model(&model.Conversation{}).Select("id").Where("user_id = ?", userID))).Order("message_id ASC, ordinal ASC")},
 		{&result.ConversationSummaryVersions, r.db.WithContext(ctx).Where("conversation_id IN (?)", r.db.Model(&model.Conversation{}).Select("id").Where("user_id = ?", userID)).Order("created_at ASC")},
 		{&result.AuditLogs, r.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at ASC")},
 	}

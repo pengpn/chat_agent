@@ -34,6 +34,7 @@ func (r *GormMessageRepository) ListByConversationForUser(ctx context.Context, u
 	items := make([]model.Message, 0)
 	err := r.db.WithContext(ctx).
 		Preload("Attachments").
+		Preload("Citations", func(db *gorm.DB) *gorm.DB { return db.Order("ordinal ASC") }).
 		Model(&model.Message{}).
 		Select("messages.*").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
@@ -50,6 +51,7 @@ func (r *GormMessageRepository) ListPageByConversationForUser(ctx context.Contex
 	items := make([]model.Message, 0, limit+1)
 	query := r.db.WithContext(ctx).
 		Preload("Attachments").
+		Preload("Citations", func(db *gorm.DB) *gorm.DB { return db.Order("ordinal ASC") }).
 		Model(&model.Message{}).
 		Select("messages.*").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
@@ -65,6 +67,7 @@ func (r *GormMessageRepository) FindByIDForUser(ctx context.Context, userID, con
 	var item model.Message
 	err := r.db.WithContext(ctx).
 		Preload("Attachments").
+		Preload("Citations", func(db *gorm.DB) *gorm.DB { return db.Order("ordinal ASC") }).
 		Model(&model.Message{}).
 		Select("messages.*").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
@@ -82,28 +85,70 @@ func (r *GormMessageRepository) Create(ctx context.Context, message *model.Messa
 
 func (r *GormMessageRepository) Finalize(ctx context.Context, id string, completion model.MessageCompletion) (model.Message, error) {
 	var item model.Message
-	err := r.db.WithContext(ctx).First(&item, "id = ?", id).Error
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&item, "id = ?", id).Error; err != nil {
+			return err
+		}
+		updates := map[string]any{
+			"content": completion.Content, "think": completion.Think,
+			"structured_output": completion.StructuredOutput, "status": completion.Status,
+			"finish_reason": completion.FinishReason,
+			"input_tokens":  completion.Usage.InputTokens, "output_tokens": completion.Usage.OutputTokens,
+			"total_tokens": completion.Usage.TotalTokens, "usage_reported": completion.Usage.UsageReported,
+			"cost_nano_usd": completion.Usage.CostNanoUSD, "cost_known": completion.Usage.CostKnown,
+		}
+		if err := tx.Model(&item).Updates(updates).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("message_id = ?", id).Delete(&model.MessageCitation{}).Error; err != nil {
+			return err
+		}
+		if len(completion.Citations) > 0 {
+			citations := append([]model.MessageCitation(nil), completion.Citations...)
+			var ownerID string
+			if err := tx.Model(&model.Conversation{}).Select("user_id").Where("id = ?", item.ConversationID).Scan(&ownerID).Error; err != nil {
+				return err
+			}
+			for index := range citations {
+				citations[index].ID = ""
+				citations[index].MessageID = id
+				owned, err := citationReferencesOwned(tx, ownerID, citations[index])
+				if err != nil {
+					return err
+				}
+				if !owned {
+					// The source may have been deleted while the model was
+					// streaming. Keep the already validated snapshot but never
+					// persist a missing or cross-user live reference.
+					citations[index].KnowledgeBaseID = nil
+					citations[index].DocumentID = nil
+					citations[index].ChunkID = nil
+				}
+			}
+			if err := tx.Create(&citations).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Preload("Citations", func(db *gorm.DB) *gorm.DB { return db.Order("ordinal ASC") }).First(&item, "id = ?", id).Error
+	})
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return model.Message{}, domain.ErrNotFound
 	}
-	if err != nil {
-		return model.Message{}, err
+	return item, err
+}
+
+func citationReferencesOwned(tx *gorm.DB, userID string, citation model.MessageCitation) (bool, error) {
+	if userID == "" || citation.KnowledgeBaseID == nil || citation.DocumentID == nil || citation.ChunkID == nil {
+		return false, nil
 	}
-	item.Content = completion.Content
-	item.Think = completion.Think
-	item.StructuredOutput = completion.StructuredOutput
-	item.Status = completion.Status
-	item.FinishReason = completion.FinishReason
-	item.InputTokens = completion.Usage.InputTokens
-	item.OutputTokens = completion.Usage.OutputTokens
-	item.TotalTokens = completion.Usage.TotalTokens
-	item.UsageReported = completion.Usage.UsageReported
-	item.CostNanoUSD = completion.Usage.CostNanoUSD
-	item.CostKnown = completion.Usage.CostKnown
-	if err := r.db.WithContext(ctx).Save(&item).Error; err != nil {
-		return model.Message{}, err
-	}
-	return item, nil
+	var count int64
+	err := tx.Table("knowledge_chunks").
+		Joins("JOIN knowledge_documents ON knowledge_documents.id = knowledge_chunks.document_id").
+		Joins("JOIN knowledge_bases ON knowledge_bases.id = knowledge_documents.knowledge_base_id").
+		Where("knowledge_chunks.id = ? AND knowledge_documents.id = ? AND knowledge_bases.id = ? AND knowledge_bases.user_id = ?",
+			*citation.ChunkID, *citation.DocumentID, *citation.KnowledgeBaseID, userID).
+		Count(&count).Error
+	return count == 1, err
 }
 
 // CreateRegeneration atomically deactivates the previous answer versions and

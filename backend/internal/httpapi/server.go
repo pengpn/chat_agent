@@ -144,13 +144,15 @@ func NewServerWithEmbeddingGateway(repositories *repository.Repositories, jwtMan
 		IngestionTimeout: cfg.Knowledge.IngestionTimeout,
 	})
 	handlers.ConfigureKnowledge(knowledgeService)
-	handlers.ConfigureKnowledgeRetrieval(service.NewKnowledgeRetrieval(repositories.Knowledge, embeddings, estimator, service.KnowledgeRetrievalConfig{
+	retrievalService := service.NewKnowledgeRetrieval(repositories.Knowledge, embeddings, estimator, service.KnowledgeRetrievalConfig{
 		CandidateLimit: cfg.Knowledge.RetrievalCandidateLimit, TopK: cfg.Knowledge.RetrievalTopK,
 		SimilarityThreshold: cfg.Knowledge.RetrievalSimilarityThreshold,
 		ContextTokenBudget:  cfg.Knowledge.RetrievalContextTokenBudget,
 		MaxKnowledgeBases:   cfg.Knowledge.RetrievalMaxKnowledgeBases,
 		MaxQueryChars:       cfg.Knowledge.RetrievalMaxQueryChars,
-	}))
+	})
+	chatService.ConfigureKnowledgeRetrieval(retrievalService)
+	handlers.ConfigureKnowledgeRetrieval(retrievalService)
 	return &Server{
 		handlers:           handlers,
 		jwt:                jwtManager,

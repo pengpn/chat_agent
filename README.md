@@ -18,6 +18,7 @@
 - [RAG 第二阶段：EmbeddingGateway 与模型适配](./docs/rag-02-embedding-gateway.md)
 - [RAG 第三阶段：文档摄取流水线](./docs/rag-03-document-ingestion.md)
 - [RAG 第四阶段：权限过滤的向量检索](./docs/rag-04-permission-filtered-vector-retrieval.md)
+- [RAG 第五阶段：Grounded Generation 与文档引用](./docs/rag-05-grounded-generation-and-citations.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -47,6 +48,7 @@
 - 独立 EmbeddingGateway：OpenAI-compatible 协议、请求前 Token 预算、批处理、受控重试、维度校验、Redis 内容哈希缓存和成本观测
 - RAG 文档摄取：知识库 CRUD、异步状态机、TXT/PDF/DOCX 结构提取、Token 分块、向量落库、幂等重试和对象删除补偿
 - RAG 精确向量检索：查询向量化、用户/知识库权限过滤、模型版本匹配、余弦 Top-K、相关性阈值和上下文 Token 预算
+- RAG 引用回答：服务端知识库选择、证据约束 Prompt、引用白名单校验、事务快照和可重连 SSE 引用事件
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
@@ -107,7 +109,7 @@ frontend/src/                 # Vue 3 对话 UI
 
 Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository` 是接口，`GormUserRepository` 是实现。Service 依赖接口，因此单测仍可注入 fake 实现，而无需连接数据库。
 
-RAG 当前已完成数据基础、EmbeddingGateway、文档摄取和权限过滤的精确向量检索。知识库文档与对话附件拥有不同生命周期；上传后后台按 `extracting → chunking → embedding → ready/failed` 推进，分块向量由 pgvector 保存。检索前先校验全部知识库归属，再对问题生成向量；SQL 同时过滤当前用户、选中的知识库、就绪状态、Provider、模型和维度，并按余弦相似度稳定排序。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)、[RAG 第二阶段](./docs/rag-02-embedding-gateway.md)、[RAG 第三阶段](./docs/rag-03-document-ingestion.md)与 [RAG 第四阶段](./docs/rag-04-permission-filtered-vector-retrieval.md)。下一阶段会把检索证据接入对话生成并持久化引用快照。
+RAG 当前已完成数据基础、EmbeddingGateway、文档摄取、权限过滤检索，以及 Grounded Generation 与引用快照。Chat 请求只提交服务端知识库 ID；后端检索后把片段编成稳定的 `[n]` 证据，作为不可信数据注入模型上下文。模型完成后按本次检索结果校验编号，只把正文实际使用的来源与 assistant 终态事务性保存。流式回答会在终态前发送可按 sequence 重放的 `citations` 事件。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)、[RAG 第二阶段](./docs/rag-02-embedding-gateway.md)、[RAG 第三阶段](./docs/rag-03-document-ingestion.md)、[RAG 第四阶段](./docs/rag-04-permission-filtered-vector-retrieval.md)与 [RAG 第五阶段](./docs/rag-05-grounded-generation-and-citations.md)。下一阶段会增加普通用户可操作的知识库管理、对话选择和引用来源面板。
 
 ## API 概览
 
@@ -155,7 +157,7 @@ RAG 当前已完成数据基础、EmbeddingGateway、文档摄取和权限过滤
 | PATCH | `/api/v1/conversations/:id/messages/:messageId/activate` | 激活问题分支或回答版本，并恢复其祖先路径 |
 | GET | `/api/v1/messages/:messageId/stream?afterSequence=N` | 按序号补发短期缓存中的 SSE 片段 |
 
-流式接口依次发送 `metadata`、多个 `think`（模型思考增量）、多个 `delta`（最终回答增量）、最后的 `done` 事件。每个事件都携带 `messageId`、递增 `sequence`，并使用同值的 SSE `id` 字段。非正常终止发送 `interrupted` 或 `error`。
+流式接口依次发送 `metadata`、多个 `think`（模型思考增量）、多个 `delta`（最终回答增量）、终态落库后的 `citations`，最后发送 `done`。每个事件都携带 `messageId`、递增 `sequence`，并使用同值的 SSE `id` 字段。非正常终止发送 `interrupted` 或 `error`；引用事件同样进入短期缓存并可按序号补发。
 
 ## 账号生命周期配置
 

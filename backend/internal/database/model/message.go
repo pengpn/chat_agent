@@ -18,6 +18,7 @@ type Message struct {
 	IsActiveResponse bool              `json:"isActiveResponse,omitempty" gorm:"not null;default:false;index"`
 	RegeneratedFrom  *string           `json:"regeneratedFromMessageId,omitempty" gorm:"type:uuid;index"`
 	GenerationKey    *string           `json:"-" gorm:"type:text;uniqueIndex"`
+	KnowledgeBaseIDs JSONStringArray   `json:"knowledgeBaseIds,omitempty" gorm:"type:jsonb"`
 	StructuredOutput JSONDocument      `json:"structuredOutput,omitempty" gorm:"type:jsonb"`
 	Provider         string            `json:"provider,omitempty" gorm:"type:text"`
 	Model            string            `json:"model,omitempty" gorm:"type:text"`
@@ -42,6 +43,7 @@ type MessageCompletion struct {
 	Status           string
 	FinishReason     string
 	Usage            MessageUsage
+	Citations        []MessageCitation
 }
 
 // MessageUsage is the final accounting data saved with an assistant message.

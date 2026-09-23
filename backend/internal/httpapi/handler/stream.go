@@ -65,11 +65,12 @@ func (h *Handler) EditMessage(c *gin.Context) {
 		return
 	}
 	var input struct {
-		Content      string   `json:"content"`
-		Provider     string   `json:"provider"`
-		Model        string   `json:"model"`
-		Temperature  *float64 `json:"temperature"`
-		OutputFormat string   `json:"outputFormat"`
+		Content          string   `json:"content"`
+		Provider         string   `json:"provider"`
+		Model            string   `json:"model"`
+		Temperature      *float64 `json:"temperature"`
+		OutputFormat     string   `json:"outputFormat"`
+		KnowledgeBaseIDs []string `json:"knowledgeBaseIds"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		if h.writeBodyTooLarge(c, err) {
@@ -80,7 +81,8 @@ func (h *Handler) EditMessage(c *gin.Context) {
 	}
 	session, err := h.chat.PrepareEdit(c.Request.Context(), currentUserID(c), c.Param("conversationID"), c.Param("messageID"), service.ChatInput{
 		Content: input.Content, Provider: input.Provider, Model: input.Model, Temperature: input.Temperature,
-		OutputFormat: input.OutputFormat, IdempotencyKey: c.GetHeader("Idempotency-Key"),
+		OutputFormat: input.OutputFormat, KnowledgeBaseIDs: input.KnowledgeBaseIDs,
+		IdempotencyKey: c.GetHeader("Idempotency-Key"),
 	})
 	if !h.handlePrepareError(c, err) {
 		return
@@ -123,6 +125,9 @@ func (h *Handler) streamPreparedSession(c *gin.Context, flusher http.Flusher, se
 	if status == "complete" {
 		h.titles.Schedule(c.Request.Context(), session.UserID, session.AssistantMessage.ConversationID)
 	}
+	// Citations are a separate cached SSE event so reconnect replay preserves
+	// the exact metadata associated with the finalized answer.
+	h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "citations", map[string]any{"citations": completed.Citations}, false)
 	switch status {
 	case "complete":
 		h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "done", map[string]any{"assistantMessage": completed}, true)
@@ -234,12 +239,13 @@ func (h *Handler) ChatMessage(c *gin.Context) {
 
 func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool) {
 	var input struct {
-		Content       string   `json:"content"`
-		Provider      string   `json:"provider"`
-		Model         string   `json:"model"`
-		Temperature   *float64 `json:"temperature"`
-		OutputFormat  string   `json:"outputFormat"`
-		AttachmentIDs []string `json:"attachmentIds"`
+		Content          string   `json:"content"`
+		Provider         string   `json:"provider"`
+		Model            string   `json:"model"`
+		Temperature      *float64 `json:"temperature"`
+		OutputFormat     string   `json:"outputFormat"`
+		AttachmentIDs    []string `json:"attachmentIds"`
+		KnowledgeBaseIDs []string `json:"knowledgeBaseIds"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		if h.writeBodyTooLarge(c, err) {
@@ -249,13 +255,14 @@ func (h *Handler) prepareChatSession(c *gin.Context) (*service.ChatSession, bool
 		return nil, false
 	}
 	session, err := h.chat.Prepare(c.Request.Context(), currentUserID(c), c.Param("conversationID"), service.ChatInput{
-		Content:        input.Content,
-		Provider:       input.Provider,
-		Model:          input.Model,
-		Temperature:    input.Temperature,
-		OutputFormat:   input.OutputFormat,
-		AttachmentIDs:  input.AttachmentIDs,
-		IdempotencyKey: c.GetHeader("Idempotency-Key"),
+		Content:          input.Content,
+		Provider:         input.Provider,
+		Model:            input.Model,
+		Temperature:      input.Temperature,
+		OutputFormat:     input.OutputFormat,
+		AttachmentIDs:    input.AttachmentIDs,
+		KnowledgeBaseIDs: input.KnowledgeBaseIDs,
+		IdempotencyKey:   c.GetHeader("Idempotency-Key"),
 	})
 	return session, h.handlePrepareError(c, err)
 }
@@ -277,6 +284,20 @@ func (h *Handler) handlePrepareError(c *gin.Context, err error) bool {
 		response.WriteErrorResp(c, http.StatusTooManyRequests, "同时生成的请求过多，请等待当前回答完成")
 	case errors.Is(err, service.ErrInvalidTemperature):
 		response.WriteErrorResp(c, http.StatusBadRequest, "temperature 必须在 0 到 2 之间")
+	case errors.Is(err, service.ErrKnowledgeQueryRequired):
+		response.WriteErrorResp(c, http.StatusBadRequest, "使用知识库时必须输入问题")
+	case errors.Is(err, service.ErrKnowledgeQueryTooLong):
+		response.WriteErrorResp(c, http.StatusBadRequest, "知识库检索问题过长")
+	case errors.Is(err, service.ErrTooManyKnowledgeBases):
+		response.WriteErrorResp(c, http.StatusBadRequest, "选择的知识库数量超过限制")
+	case errors.Is(err, service.ErrInvalidKnowledgeBaseID):
+		response.WriteErrorResp(c, http.StatusBadRequest, "知识库 ID 格式不正确")
+	case errors.Is(err, service.ErrKnowledgeBaseNotFound):
+		response.WriteErrorResp(c, http.StatusNotFound, "知识库不存在或无权访问")
+	case errors.Is(err, service.ErrEmbeddingNotConfigured):
+		response.WriteErrorResp(c, http.StatusServiceUnavailable, "知识库检索暂不可用")
+	case errors.Is(err, service.ErrKnowledgeRetrievalFailed):
+		response.WriteErrorResp(c, http.StatusBadGateway, "知识库检索失败")
 	case errors.Is(err, service.ErrOutputFormatNotFound):
 		response.WriteErrorResp(c, http.StatusBadRequest, "不支持的输出格式")
 	case errors.Is(err, llmgateway.ErrInvalidResponseFormat):

@@ -136,15 +136,58 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	if err := repositories.Conversations.Create(ctx, &conversation); err != nil {
 		t.Fatal(err)
 	}
-	message := model.Message{ConversationID: conversation.ID, Role: "assistant", Content: "退款期限为七日。[1]", Status: "complete"}
+	message := model.Message{ConversationID: conversation.ID, Role: "assistant", Status: "streaming"}
 	if err := db.WithContext(ctx).Create(&message).Error; err != nil {
 		t.Fatal(err)
 	}
-	citation := model.MessageCitation{
-		MessageID: message.ID, KnowledgeBaseID: &base.ID, DocumentID: &document.ID, ChunkID: &stored[0].ID,
-		Ordinal: 1, SourceName: document.OriginalName, Quote: stored[0].Content, SimilarityScore: 0.95,
+	completed, err := repositories.Messages.Finalize(ctx, message.ID, model.MessageCompletion{
+		Content: "退款期限为七日。[1]", Status: "complete", FinishReason: "stop",
+		Citations: []model.MessageCitation{{
+			KnowledgeBaseID: &base.ID, DocumentID: &document.ID, ChunkID: &stored[0].ID,
+			Ordinal: 1, SourceName: document.OriginalName, Quote: stored[0].Content, SimilarityScore: 0.95,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := db.WithContext(ctx).Create(&citation).Error; err != nil {
+	if len(completed.Citations) != 1 || completed.Citations[0].MessageID != message.ID {
+		t.Fatalf("finalized citations = %+v", completed.Citations)
+	}
+	citation := completed.Citations[0]
+
+	rollbackMessage := model.Message{ConversationID: conversation.ID, Role: "assistant", Status: "streaming"}
+	if err := db.WithContext(ctx).Create(&rollbackMessage).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = repositories.Messages.Finalize(ctx, rollbackMessage.ID, model.MessageCompletion{
+		Content: "不应提交", Status: "complete",
+		Citations: []model.MessageCitation{
+			{Ordinal: 1, SourceName: "一", Quote: "一"},
+			{Ordinal: 1, SourceName: "二", Quote: "二"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected duplicate citation ordinal to roll back finalization")
+	}
+	var rolledBack model.Message
+	if err := db.WithContext(ctx).First(&rolledBack, "id = ?", rollbackMessage.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rolledBack.Status != "streaming" || rolledBack.Content != "" {
+		t.Fatalf("message finalization was not rolled back: %+v", rolledBack)
+	}
+	var rolledBackCitationCount int64
+	if err := db.WithContext(ctx).Model(&model.MessageCitation{}).Where("message_id = ?", rollbackMessage.ID).Count(&rolledBackCitationCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rolledBackCitationCount != 0 {
+		t.Fatalf("rolled-back citations = %d", rolledBackCitationCount)
+	}
+	if err := db.WithContext(ctx).Delete(&rollbackMessage).Error; err != nil {
+		t.Fatal(err)
+	}
+	deletedDuringGeneration := model.Message{ConversationID: conversation.ID, Role: "assistant", Status: "streaming"}
+	if err := db.WithContext(ctx).Create(&deletedDuringGeneration).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := repositories.Knowledge.DeleteBaseWithCleanup(ctx, owner.ID, base.ID); err != nil {
@@ -165,6 +208,19 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	}
 	if !foundCleanup {
 		t.Fatal("knowledge object cleanup task was not created transactionally")
+	}
+	completedAfterDelete, err := repositories.Messages.Finalize(ctx, deletedDuringGeneration.ID, model.MessageCompletion{
+		Content: "删除期间仍保留快照[1]", Status: "complete", FinishReason: "stop",
+		Citations: []model.MessageCitation{{
+			KnowledgeBaseID: &base.ID, DocumentID: &document.ID, ChunkID: &stored[0].ID,
+			Ordinal: 1, SourceName: document.OriginalName, Quote: stored[0].Content, SimilarityScore: 0.95,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completedAfterDelete.Citations) != 1 || completedAfterDelete.Citations[0].KnowledgeBaseID != nil || completedAfterDelete.Citations[0].Quote == "" {
+		t.Fatalf("citation finalized after source deletion = %+v", completedAfterDelete.Citations)
 	}
 	var preserved model.MessageCitation
 	if err := db.WithContext(ctx).First(&preserved, "id = ?", citation.ID).Error; err != nil {

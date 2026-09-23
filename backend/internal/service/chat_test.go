@@ -453,6 +453,7 @@ func (f *fakeChatRepository) Finalize(_ context.Context, id string, completion m
 		UsageReported:    completion.Usage.UsageReported,
 		CostNanoUSD:      completion.Usage.CostNanoUSD,
 		CostKnown:        completion.Usage.CostKnown,
+		Citations:        append([]model.MessageCitation(nil), completion.Citations...),
 	}, nil
 }
 
