@@ -154,9 +154,8 @@ func (s *ChatService) ConfigureSafety(deps SafetyDependencies) {
 	}
 }
 
-// ConfigureKnowledgeRetrieval enables server-side RAG for chat requests that
-// carry knowledge base IDs. Raw retrieved content is never accepted from the
-// client.
+// ConfigureKnowledgeRetrieval 为携带知识库 ID 的对话请求开启服务端 RAG。
+// 检索到的原文只由服务端注入，客户端传来的原始片段一律不接受。
 func (s *ChatService) ConfigureKnowledgeRetrieval(retrieval KnowledgeRetriever) {
 	s.retrieval = retrieval
 }

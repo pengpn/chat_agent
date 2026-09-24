@@ -117,9 +117,8 @@ func (r *GormMessageRepository) Finalize(ctx context.Context, id string, complet
 					return err
 				}
 				if !owned {
-					// The source may have been deleted while the model was
-					// streaming. Keep the already validated snapshot but never
-					// persist a missing or cross-user live reference.
+					// 模型还在输出时，来源文档可能已被删除。
+					// 已经校验过的引用快照仍然保留，但不能把已消失或属于其他用户的实时引用写入数据库。
 					citations[index].KnowledgeBaseID = nil
 					citations[index].DocumentID = nil
 					citations[index].ChunkID = nil

@@ -72,7 +72,7 @@ func TestGroundingSeparatesSystemRulesFromUntrustedSourceData(t *testing.T) {
 		t.Fatal(err)
 	}
 	prompt := groundingSystemPrompt()
-	for _, expected := range []string{"untrusted data", "never as instructions", "RETRIEVED_SOURCES_UNTRUSTED_JSON"} {
+	for _, expected := range []string{"不可信数据", "绝不能当作指令", "RETRIEVED_SOURCES_UNTRUSTED_JSON"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("system prompt does not contain %q: %s", expected, prompt)
 		}

@@ -125,8 +125,8 @@ func (h *Handler) streamPreparedSession(c *gin.Context, flusher http.Flusher, se
 	if status == "complete" {
 		h.titles.Schedule(c.Request.Context(), session.UserID, session.AssistantMessage.ConversationID)
 	}
-	// Citations are a separate cached SSE event so reconnect replay preserves
-	// the exact metadata associated with the finalized answer.
+	// 引用单独写成一条可缓存的 SSE 事件。断线重连按序号回放时，
+	// 才能带回和最终回答绑定的那一份引用元数据，而不是重新计算。
 	h.appendAndWriteStreamEvent(c.Writer, flusher, messageID, "citations", map[string]any{"citations": completed.Citations}, false)
 	switch status {
 	case "complete":

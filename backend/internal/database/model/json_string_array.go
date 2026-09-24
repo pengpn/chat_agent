@@ -7,9 +7,9 @@ import (
 	"fmt"
 )
 
-// JSONStringArray maps a strongly typed string slice to PostgreSQL jsonb.
-// It is used for server-owned IDs that must survive regeneration without
-// accepting arbitrary client-provided JSON objects.
+// JSONStringArray 把强类型字符串切片映射为 PostgreSQL jsonb。
+// 用来保存服务端自己签发的 ID：重新生成回答时这些 ID 必须原样保留，
+// 同时拒绝客户端塞进来的任意 JSON 对象。
 type JSONStringArray []string
 
 func (values JSONStringArray) Value() (driver.Value, error) {
