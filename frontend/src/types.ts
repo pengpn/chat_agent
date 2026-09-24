@@ -49,6 +49,51 @@ export interface Message {
   finishReason?: string
   createdAt: string
 	attachments?: Attachment[]
+	knowledgeBaseIds?: string[]
+	citations?: MessageCitation[]
+}
+
+export interface KnowledgeBase {
+  id: string
+  name: string
+  description: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type KnowledgeDocumentStatus = 'uploaded' | 'extracting' | 'chunking' | 'embedding' | 'ready' | 'failed'
+
+export interface KnowledgeDocument {
+  id: string
+  knowledgeBaseId: string
+  name: string
+  extension: string
+  mimeType: string
+  size: number
+  checksum: string
+  status: KnowledgeDocumentStatus
+  errorCode?: string
+  errorMessage?: string
+  chunkCount: number
+  ingestionVersion: number
+  indexedAt?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MessageCitation {
+  id?: string
+  messageId?: string
+  knowledgeBaseId?: string
+  documentId?: string
+  chunkId?: string
+  ordinal: number
+  sourceName: string
+  pageNumber?: number
+  sectionTitle?: string
+  quote: string
+  similarityScore: number
+  createdAt?: string
 }
 
 export interface Attachment {

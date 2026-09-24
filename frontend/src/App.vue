@@ -4,6 +4,7 @@ import AuthPanel from '@/components/AuthPanel.vue'
 import AccountPanel from '@/components/AccountPanel.vue'
 import ChatPanel from '@/components/ChatPanel.vue'
 import ConversationSidebar from '@/components/ConversationSidebar.vue'
+import KnowledgePanel from '@/components/KnowledgePanel.vue'
 import { mergeConversations, mergeMessages, sortMessagesAscending } from '@/lib/list-pagination'
 import {
   activateBranch,
@@ -13,6 +14,7 @@ import {
   getMe,
   listConversations,
   listMessages,
+  listKnowledgeBases,
   listProviders,
   logoutSession,
   refreshAccessToken,
@@ -26,7 +28,7 @@ import {
   updateStoredUser,
   type StreamHandlers
 } from '@/lib/api'
-import type { AuthSession, Conversation, Message, ModelProvider, User } from '@/types'
+import type { AuthSession, Conversation, KnowledgeBase, Message, ModelProvider, User } from '@/types'
 
 const initialSession = restoreSession()
 const initialURL = new URL(window.location.href)
@@ -50,6 +52,9 @@ const messagesHaveMore = ref(false)
 const messagesLoadingOlder = ref(false)
 const messagesLoading = ref(false)
 const providers = ref<ModelProvider[]>([])
+const knowledgeBases = ref<KnowledgeBase[]>([])
+const knowledgeError = ref('')
+const workspace = ref<'chat' | 'knowledge'>('chat')
 const booting = ref(true)
 const error = ref('')
 const streamNotice = ref('')
@@ -131,7 +136,7 @@ async function closeAccount() {
 async function loadWorkspace() {
   error.value = ''
   conversationSearch.value = ''
-  const [conversationPage, providerItems] = await Promise.all([listConversations(), listProviders()])
+  const [conversationPage, providerItems] = await Promise.all([listConversations(), listProviders(), loadKnowledgeBases()])
   conversations.value = conversationPage.items
   conversationCursor.value = conversationPage.nextCursor
   conversationsHaveMore.value = conversationPage.hasMore
@@ -140,6 +145,7 @@ async function loadWorkspace() {
 }
 
 async function createNewConversation() {
+  workspace.value = 'chat'
   try {
     const conversation = await createConversation()
     conversationSearch.value = ''
@@ -159,6 +165,7 @@ async function createNewConversation() {
 }
 
 async function selectConversation(id: string) {
+  workspace.value = 'chat'
   const requestVersion = ++messageRequestVersion
   activeID.value = id
   activeConversationSnapshot.value = conversations.value.find((item) => item.id === id) ?? activeConversationSnapshot.value
@@ -272,11 +279,20 @@ async function removeConversation(conversation: Conversation) {
   }
 }
 
-async function send(content: string, provider: string, model: string, attachmentIDs: string[]) {
+async function loadKnowledgeBases() {
+  knowledgeError.value = ''
+  try {
+    knowledgeBases.value = await listKnowledgeBases()
+  } catch (cause) {
+    knowledgeError.value = messageFor(cause)
+  }
+}
+
+async function send(content: string, provider: string, model: string, attachmentIDs: string[], knowledgeBaseIDs: string[]) {
 	if (!activeID.value) return
 	const conversationID = activeID.value
 	await runStreamingRequest(conversationID, (handlers, signal, idempotencyKey) =>
-		streamMessage(conversationID, { content, provider, model, attachmentIds: attachmentIDs }, handlers, signal, idempotencyKey))
+		streamMessage(conversationID, { content, provider, model, attachmentIds: attachmentIDs, knowledgeBaseIds: knowledgeBaseIDs }, handlers, signal, idempotencyKey))
 }
 
 async function regenerate(message: Message, provider: string, model: string) {
@@ -287,11 +303,11 @@ async function regenerate(message: Message, provider: string, model: string) {
 		streamRegeneratedMessage(conversationID, message.id, { provider, model }, handlers, signal, idempotencyKey))
 }
 
-async function editMessage(message: Message, content: string, provider: string, model: string) {
+async function editMessage(message: Message, content: string, provider: string, model: string, knowledgeBaseIDs: string[]) {
 	if (!activeID.value || message.role !== 'user') return
 	const conversationID = activeID.value
 	await runStreamingRequest(conversationID, (handlers, signal, idempotencyKey) =>
-		streamEditedMessage(conversationID, message.id, { content, provider, model }, handlers, signal, idempotencyKey))
+		streamEditedMessage(conversationID, message.id, { content, provider, model, knowledgeBaseIds: knowledgeBaseIDs }, handlers, signal, idempotencyKey))
 }
 
 function linkLegacyResponseToUser(message: Message) {
@@ -351,6 +367,10 @@ async function runStreamingRequest(
 		const turn = liveTurns.get(conversationID)
 		if (turn) turn.assistantMessage.content += delta
 		if (activeID.value === conversationID) streamNotice.value = ''
+      },
+      onCitations(citations) {
+        const turn = liveTurns.get(conversationID)
+        if (turn) turn.assistantMessage.citations = citations
       },
       onDone(message) {
         receivedDone = true
@@ -541,8 +561,11 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       @load-more="loadMoreConversations"
       @account="openAccount"
       @logout="logout"
+      @open-knowledge="workspace = 'knowledge'"
     />
+    <KnowledgePanel v-if="workspace === 'knowledge'" @back="workspace = 'chat'" @changed="loadKnowledgeBases" />
     <ChatPanel
+      v-else
       :conversation="activeConversation"
       :messages="messages"
       :providers="providers"
@@ -552,6 +575,8 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       :has-older-messages="messagesHaveMore"
       :loading-older-messages="messagesLoadingOlder"
       :loading-messages="messagesLoading"
+      :knowledge-bases="knowledgeBases"
+      :knowledge-error="knowledgeError"
       @send="send"
 	  @regenerate="regenerate"
 	  @edit-message="editMessage"
@@ -559,6 +584,8 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       @load-older="loadOlderMessages"
       @account="openAccount"
       @stop="stop"
+      @reload-knowledge="loadKnowledgeBases"
+      @open-knowledge="workspace = 'knowledge'"
     />
     <AccountPanel
       v-if="accountOpen"

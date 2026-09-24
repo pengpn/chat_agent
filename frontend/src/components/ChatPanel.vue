@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import CitationPanel from '@/components/CitationPanel.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
-import { deleteAttachment, downloadAttachment, retryAttachment, uploadAttachment } from '@/lib/api'
+import { deleteAttachment, downloadAttachment, downloadKnowledgeDocument, retryAttachment, uploadAttachment } from '@/lib/api'
 import { shouldSendComposerMessage } from '@/lib/composer-keyboard'
+import { describeKnowledgeScope, MAX_SELECTED_KNOWLEDGE_BASES } from '@/lib/knowledge-ui'
 import { buildDisplayMessages } from '@/lib/message-tree'
 import { isNearScrollBottom } from '@/lib/scroll'
-import type { Attachment, Conversation, Message, ModelProvider } from '@/types'
+import type { Attachment, Conversation, KnowledgeBase, Message, MessageCitation, ModelProvider } from '@/types'
 
 const props = defineProps<{
   conversation: Conversation | null
@@ -17,16 +19,20 @@ const props = defineProps<{
   hasOlderMessages: boolean
   loadingOlderMessages: boolean
   loadingMessages: boolean
+  knowledgeBases: KnowledgeBase[]
+  knowledgeError: string
 }>()
 
 const emit = defineEmits<{
-  send: [content: string, provider: string, model: string, attachmentIDs: string[]]
+  send: [content: string, provider: string, model: string, attachmentIDs: string[], knowledgeBaseIDs: string[]]
   regenerate: [message: Message, provider: string, model: string]
-  editMessage: [message: Message, content: string, provider: string, model: string]
+  editMessage: [message: Message, content: string, provider: string, model: string, knowledgeBaseIDs: string[]]
+  reloadKnowledge: []
   switchVersion: [message: Message]
   loadOlder: [done: () => void]
   account: []
   stop: []
+  openKnowledge: []
 }>()
 
 const draft = ref('')
@@ -44,6 +50,15 @@ const draggingFiles = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const modelPicker = ref<HTMLElement | null>(null)
 const modelPickerOpen = ref(false)
+const knowledgePicker = ref<HTMLElement | null>(null)
+const knowledgePickerOpen = ref(false)
+const selectedKnowledgeIDs = ref<string[]>([])
+const citationMessageID = ref<string | null>(null)
+const citationOrdinal = ref<number | null>(null)
+const citationPhase = ref<'loading' | 'empty' | 'ready' | 'error'>('empty')
+const citationError = ref('')
+const citationDownloading = ref(false)
+let citationTrigger: HTMLElement | null = null
 
 const models = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.models ?? [])
 const providerLabel = computed(() => props.providers.find((item) => item.id === selectedProvider.value)?.label ?? '选择模型')
@@ -53,6 +68,12 @@ const selectedModelSupportsVision = computed(() => selectedProviderConfig.value?
 const hasImageAttachment = computed(() => attachments.value.some((item) => item.kind === 'image'))
 const visionUnsupported = computed(() => hasImageAttachment.value && !selectedProviderConfig.value?.visionModels?.includes(selectedModel.value))
 const attachmentBlocked = computed(() => uploading.value > 0 || attachments.value.some((item) => item.status !== 'ready') || visionUnsupported.value)
+const selectedKnowledgeBases = computed(() => selectedKnowledgeIDs.value
+  .map((id) => props.knowledgeBases.find((item) => item.id === id))
+  .filter((item): item is KnowledgeBase => Boolean(item)))
+const knowledgeScope = computed(() => describeKnowledgeScope(selectedKnowledgeBases.value.map((item) => item.name)))
+const citationMessage = computed(() => props.messages.find((item) => item.id === citationMessageID.value) ?? null)
+const activeCitations = computed(() => citationMessage.value?.citations ?? [])
 
 watch(() => props.providers, (providers) => {
   if (!providers.length) return
@@ -62,7 +83,17 @@ watch(models, (items) => {
   if (!items.includes(selectedModel.value)) selectedModel.value = items[0] || ''
 }, { immediate: true })
 watch(() => props.pending, (pending) => {
-  if (pending) modelPickerOpen.value = false
+  if (pending) {
+    modelPickerOpen.value = false
+    knowledgePickerOpen.value = false
+  }
+})
+watch(activeCitations, (citations) => {
+  if (!citationMessageID.value) return
+  if (citationPhase.value === 'loading' && citations.length) {
+    citationPhase.value = 'ready'
+    citationOrdinal.value = citationOrdinal.value ?? citations[0].ordinal
+  }
 })
 watch(() => props.messages.map((item) => `${item.content}\u0000${item.think ?? ''}`).join('\u0001'), async () => {
   if (!followLatestMessage.value) return
@@ -90,6 +121,7 @@ function chooseModel(provider: ModelProvider, model: string) {
 
 function closeModelPickerOnOutsideClick(event: PointerEvent) {
   if (!modelPicker.value?.contains(event.target as Node)) modelPickerOpen.value = false
+  if (!knowledgePicker.value?.contains(event.target as Node)) knowledgePickerOpen.value = false
 }
 
 onMounted(() => document.addEventListener('pointerdown', closeModelPickerOnOutsideClick))
@@ -123,7 +155,7 @@ function send() {
   draft.value = ''
   const attachmentIDs = attachments.value.map((item) => item.id)
   attachments.value = []
-  emit('send', content, selectedProvider.value, selectedModel.value, attachmentIDs)
+  emit('send', content, selectedProvider.value, selectedModel.value, attachmentIDs, [...selectedKnowledgeIDs.value])
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -142,6 +174,7 @@ function startEditing(message: Message) {
 	if (props.pending) return
 	editingID.value = message.id
 	editDraft.value = message.content
+	selectedKnowledgeIDs.value = [...(message.knowledgeBaseIds ?? [])]
 	nextTick(() => document.getElementById(`edit-${message.id}`)?.focus())
 }
 
@@ -154,7 +187,7 @@ function submitEdit(message: Message) {
 	const content = editDraft.value.trim()
 	if (!content || content === message.content || props.pending || !selectedProvider.value || !selectedModel.value) return
 	resumeFollowingLatestMessage()
-	emit('editMessage', message, content, selectedProvider.value, selectedModel.value)
+	emit('editMessage', message, content, selectedProvider.value, selectedModel.value, [...selectedKnowledgeIDs.value])
 	cancelEditing()
 }
 
@@ -245,6 +278,64 @@ async function clearPendingAttachments(conversationID: string) {
 	await Promise.allSettled(pendingItems.map((item) => deleteAttachment(conversationID, item.id)))
 }
 
+function toggleKnowledge(id: string) {
+  if (selectedKnowledgeIDs.value.includes(id)) {
+    selectedKnowledgeIDs.value = selectedKnowledgeIDs.value.filter((item) => item !== id)
+    return
+  }
+  if (selectedKnowledgeIDs.value.length >= MAX_SELECTED_KNOWLEDGE_BASES) return
+  selectedKnowledgeIDs.value = [...selectedKnowledgeIDs.value, id]
+}
+
+function scopeForMessage(message: Message) {
+  const ids = message.knowledgeBaseIds ?? []
+  if (!ids.length) return ''
+  const names = ids.map((id) => props.knowledgeBases.find((item) => item.id === id)?.name ?? '已删除的知识库')
+  return `检索范围：${names.join('、')}`
+}
+
+function openCitations(message: Message, ordinal: number | null, trigger?: HTMLElement | null) {
+  citationTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  citationMessageID.value = message.id
+  citationError.value = ''
+  citationDownloading.value = false
+  if (message.status === 'streaming' && !message.citations?.length) {
+    citationPhase.value = 'loading'
+    citationOrdinal.value = null
+    return
+  }
+  if (!message.citations?.length) {
+    citationPhase.value = 'empty'
+    citationOrdinal.value = null
+    return
+  }
+  citationPhase.value = 'ready'
+  citationOrdinal.value = ordinal ?? message.citations[0].ordinal
+}
+
+async function closeCitations() {
+  citationMessageID.value = null
+  citationOrdinal.value = null
+  citationError.value = ''
+  await nextTick()
+  citationTrigger?.focus()
+  citationTrigger = null
+}
+
+async function downloadCitation(citation: MessageCitation) {
+  if (!citation.knowledgeBaseId || !citation.documentId) return
+  citationDownloading.value = true
+  citationError.value = ''
+  try {
+    await downloadKnowledgeDocument(citation.knowledgeBaseId, citation.documentId, citation.sourceName)
+  } catch (cause) {
+    citationPhase.value = 'ready'
+    citationError.value = cause instanceof Error ? cause.message : '原文下载失败'
+  } finally {
+    citationDownloading.value = false
+  }
+}
+
 function formatSize(bytes: number) { return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB` }
 function openAttachment(message: Message, item: Attachment) { void downloadAttachment(message.conversationId, item).catch((cause) => { attachmentError.value = cause instanceof Error ? cause.message : '下载失败' }) }
 </script>
@@ -258,6 +349,7 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
       </div>
       <div class="chat-header-actions">
         <div class="model-indicator"><span class="status-dot" />{{ providerLabel }} · {{ selectedModel || '未配置' }}</div>
+        <button class="mobile-knowledge-button" type="button" @click="emit('openKnowledge')">知识库</button>
         <button class="mobile-account-button" type="button" aria-label="打开账户与安全设置" title="账户与安全" @click="emit('account')">
           <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5" /><path d="M5.5 19c.8-3.4 3-5.1 6.5-5.1s5.7 1.7 6.5 5.1" /></svg>
         </button>
@@ -293,6 +385,7 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
 			</div>
 		</div>
 		<template v-else>
+		<p v-if="entry.message.role === 'user' && scopeForMessage(entry.message)" class="knowledge-scope">{{ scopeForMessage(entry.message) }}</p>
 		<div v-if="entry.message.attachments?.length" class="message-attachments" aria-label="消息附件">
 			<button v-for="item in entry.message.attachments" :key="item.id" type="button" @click="openAttachment(entry.message, item)">
 				<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></svg>
@@ -304,7 +397,7 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
           <div class="message-think-content">{{ entry.message.think }}</div>
         </details>
 		<pre v-if="entry.message.structuredOutput !== undefined && entry.message.structuredOutput !== null" class="structured-output"><code>{{ JSON.stringify(entry.message.structuredOutput, null, 2) }}</code></pre>
-		<MarkdownContent v-else :content="entry.message.content" /><span v-if="entry.message.status === 'streaming'" class="cursor" />
+		<MarkdownContent v-else :content="entry.message.content" :citations="entry.message.citations" @open-citation="openCitations(entry.message, $event)" /><span v-if="entry.message.status === 'streaming'" class="cursor" />
 		<p v-if="entry.message.status === 'interrupted'" class="message-status">回答已中断，可重新生成。</p>
         <p v-if="entry.message.status === 'error'" class="message-status">这次回答未能完成，请重试。</p>
         <div class="response-actions">
@@ -316,7 +409,8 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
 		  <button v-if="entry.message.role === 'user'" class="regenerate-button" :disabled="pending" @click="startEditing(entry.message)">
 			<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 20 4.5-1 10-10a2.12 2.12 0 0 0-3-3l-10 10L4 20Z" /><path d="m13.5 7.5 3 3" /></svg>编辑
 		  </button>
-          <button v-else class="regenerate-button" :disabled="pending || entry.message.status === 'streaming'" @click="regenerate(entry.message)">
+          <button v-if="entry.message.role !== 'user'" class="regenerate-button" type="button" @click="openCitations(entry.message, entry.message.citations?.[0]?.ordinal ?? null, $event.currentTarget as HTMLElement)">查看来源</button>
+          <button v-if="entry.message.role !== 'user'" class="regenerate-button" :disabled="pending || entry.message.status === 'streaming'" @click="regenerate(entry.message)">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" /></svg>重新生成
           </button>
         </div>
@@ -340,6 +434,13 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
 		</div>
 		<p v-if="visionUnsupported" class="attachment-inline-error" role="alert">当前模型不支持图片输入，请切换到标记为视觉能力的模型。</p>
 		<p v-if="attachmentError" class="attachment-inline-error" role="alert">{{ attachmentError }}</p>
+        <div v-if="selectedKnowledgeBases.length" class="knowledge-scope-chips" aria-label="当前检索范围">
+          <span v-for="base in selectedKnowledgeBases" :key="base.id" class="knowledge-chip">
+            {{ base.name }}
+            <button type="button" :aria-label="`取消选择 ${base.name}`" @click="toggleKnowledge(base.id)">×</button>
+          </span>
+        </div>
+        <p class="knowledge-scope composer-scope">{{ knowledgeScope }}</p>
         <textarea v-model="draft" :disabled="!conversation || !providers.length || pending" placeholder="给 Agent 一个任务…" rows="1" @keydown="onKeydown" @paste="onPaste" />
         <div class="composer-bottom">
 		  <div class="composer-tools">
@@ -347,6 +448,30 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
 			<button class="attach-button" type="button" :disabled="!conversation || pending || attachments.length >= 5" aria-label="添加图片或文件" title="添加图片或文件" @click="fileInput?.click()">
 				<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
 			</button>
+          <div ref="knowledgePicker" class="model-picker knowledge-picker" @keydown.esc="knowledgePickerOpen = false">
+            <button class="model-picker-trigger" type="button" :disabled="pending" aria-haspopup="listbox" :aria-expanded="knowledgePickerOpen" aria-label="选择知识库" @click="knowledgePickerOpen = !knowledgePickerOpen">
+              <span class="model-picker-current"><small>知识库</small><strong>{{ selectedKnowledgeBases.length ? `已选 ${selectedKnowledgeBases.length} 个` : '不使用资料' }}</strong></span>
+              <svg class="model-picker-chevron" :class="{ open: knowledgePickerOpen }" aria-hidden="true" viewBox="0 0 20 20"><path d="m6 8 4 4 4-4" /></svg>
+            </button>
+            <div v-if="knowledgePickerOpen" class="model-picker-menu" role="listbox" aria-multiselectable="true" aria-label="可选知识库">
+              <div class="model-picker-heading"><strong>检索范围</strong><button v-if="knowledgeError" type="button" class="text-action" @click="emit('reloadKnowledge')">重试</button></div>
+              <p v-if="knowledgeError" class="citation-state-error" role="alert">{{ knowledgeError }}</p>
+              <p v-else-if="!knowledgeBases.length" class="knowledge-picker-empty">还没有知识库。可以先到知识库页面上传资料。</p>
+              <button
+                v-for="base in knowledgeBases"
+                :key="base.id"
+                type="button"
+                role="option"
+                :aria-selected="selectedKnowledgeIDs.includes(base.id)"
+                :class="{ selected: selectedKnowledgeIDs.includes(base.id) }"
+                :disabled="!selectedKnowledgeIDs.includes(base.id) && selectedKnowledgeIDs.length >= MAX_SELECTED_KNOWLEDGE_BASES"
+                @click="toggleKnowledge(base.id)"
+              >
+                <span class="model-option-check" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" /></svg></span>
+                <span class="model-option-copy"><strong>{{ base.name }}</strong><small>{{ base.description || '未填写说明' }}</small></span>
+              </button>
+            </div>
+          </div>
 		  <div ref="modelPicker" class="model-picker" @keydown.esc="modelPickerOpen = false">
 			<button
 			  class="model-picker-trigger"
@@ -389,7 +514,18 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
           <button v-else class="send-button" :disabled="(!draft.trim() && !attachments.length) || attachmentBlocked || !conversation || !selectedModel" @click="send">发送</button>
         </div>
       </div>
-      <p class="composer-hint">Enter 发送 · Shift + Enter 换行 · 对话内容将保存在你的工作空间</p>
+      <p class="composer-hint">Enter 发送 · Shift + Enter 换行 · 选择知识库后，回答会标明依据来自哪份资料</p>
     </footer>
+    <CitationPanel
+      v-if="citationMessageID"
+      :citations="activeCitations"
+      :active-ordinal="citationOrdinal"
+      :phase="citationPhase"
+      :error="citationError"
+      :downloading="citationDownloading"
+      @close="closeCitations"
+      @select="citationOrdinal = $event"
+      @download="downloadCitation"
+    />
   </main>
 </template>

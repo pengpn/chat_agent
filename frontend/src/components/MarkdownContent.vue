@@ -2,8 +2,11 @@
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { computed, onBeforeUnmount } from 'vue'
+import { annotateCitationHtml } from '@/lib/knowledge-ui'
+import type { MessageCitation } from '@/types'
 
-const props = defineProps<{ content: string }>()
+const props = defineProps<{ content: string; citations?: MessageCitation[] }>()
+const emit = defineEmits<{ openCitation: [ordinal: number] }>()
 const feedbackTimers = new Map<HTMLButtonElement, number>()
 
 const renderedContent = computed(() => {
@@ -35,8 +38,18 @@ const renderedContent = computed(() => {
     pre.before(wrapper)
     wrapper.append(toolbar, pre)
   }
-  return template.innerHTML
+  const ordinals = (props.citations ?? []).map((item) => item.ordinal)
+  return annotateCitationHtml(template.innerHTML, ordinals)
 })
+
+function onContentClick(event: MouseEvent) {
+  const marker = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-citation]')
+  if (marker) {
+    emit('openCitation', Number(marker.dataset.citation))
+    return
+  }
+  void copyCode(event)
+}
 
 async function copyCode(event: MouseEvent) {
   const target = event.target as HTMLElement | null
@@ -89,5 +102,5 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="message-content markdown-content" @click="copyCode" v-html="renderedContent" />
+  <div class="message-content markdown-content" @click="onContentClick" v-html="renderedContent" />
 </template>

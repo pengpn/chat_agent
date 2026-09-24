@@ -21,6 +21,7 @@ const emit = defineEmits<{
   loadMore: []
   account: []
   logout: []
+  openKnowledge: []
 }>()
 
 const editingID = ref<string | null>(null)
@@ -107,6 +108,7 @@ function requestRemove(conversation: Conversation) {
     <div class="sidebar-top">
       <div class="wordmark"><span class="wordmark-mark" aria-hidden="true"><i /><i /><i /><i /></span><span>Agent Workspace</span></div>
       <button class="new-chat" @click="emit('create')"><b>+</b> 新建对话</button>
+      <button class="knowledge-nav" type="button" @click="emit('openKnowledge')">知识库</button>
     </div>
     <div class="conversation-search">
       <label class="sr-only" for="conversation-search">搜索对话</label>

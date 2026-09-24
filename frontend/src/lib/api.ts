@@ -1,4 +1,4 @@
-import type { Attachment, AuthSession, Conversation, CursorPage, DeviceSession, Message, ModelProvider, User } from '@/types'
+import type { Attachment, AuthSession, Conversation, CursorPage, DeviceSession, KnowledgeBase, KnowledgeDocument, Message, MessageCitation, ModelProvider, User } from '@/types'
 
 const SESSION_KEY = 'agent-platform.session'
 let token = ''
@@ -193,6 +193,7 @@ export type ChatPayload = {
   temperature?: number
   outputFormat?: string
 	attachmentIds?: string[]
+	knowledgeBaseIds?: string[]
 }
 
 export type RegeneratePayload = Omit<ChatPayload, 'content'>
@@ -211,6 +212,7 @@ export type StreamHandlers = {
   onMetadata: (userMessage: Message, assistantMessage: Message) => void
   onThink: (content: string) => void
   onDelta: (content: string) => void
+  onCitations?: (citations: MessageCitation[]) => void
   onReconnect: (attempt: number, maxRetries: number) => void
   onDone: (message: Message) => void
   onInterrupted: (message: Message, reason: string) => void
@@ -396,6 +398,7 @@ async function consumeEventStream(response: Response, handlers: StreamHandlers, 
         if (event === 'metadata') handlers.onMetadata(data.userMessage, data.assistantMessage)
         if (event === 'think') handlers.onThink(data.content)
         if (event === 'delta') handlers.onDelta(data.content)
+        if (event === 'citations') handlers.onCitations?.(Array.isArray(data.citations) ? data.citations : [])
         if (event === 'done') {
 		  state.terminal = true
           handlers.onDone(data.assistantMessage)
@@ -438,6 +441,91 @@ export async function retryAttachment(conversationID: string, attachmentID: stri
 
 export async function deleteAttachment(conversationID: string, attachmentID: string): Promise<void> {
 	await request<unknown>(`/api/v1/conversations/${conversationID}/attachments/${attachmentID}`, { method: 'DELETE' })
+}
+
+export async function listKnowledgeBases(): Promise<KnowledgeBase[]> {
+  return (await request<{ knowledgeBases: KnowledgeBase[] }>('/api/v1/knowledge-bases')).knowledgeBases
+}
+
+export async function createKnowledgeBase(name: string, description: string): Promise<KnowledgeBase> {
+  return (await request<{ knowledgeBase: KnowledgeBase }>('/api/v1/knowledge-bases', {
+    method: 'POST',
+    body: JSON.stringify({ name, description }),
+  })).knowledgeBase
+}
+
+export async function updateKnowledgeBase(id: string, name: string, description: string): Promise<KnowledgeBase> {
+  return (await request<{ knowledgeBase: KnowledgeBase }>(`/api/v1/knowledge-bases/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name, description }),
+  })).knowledgeBase
+}
+
+export async function deleteKnowledgeBase(id: string): Promise<void> {
+  await request<unknown>(`/api/v1/knowledge-bases/${id}`, { method: 'DELETE' })
+}
+
+export async function listKnowledgeDocuments(baseID: string): Promise<KnowledgeDocument[]> {
+  return (await request<{ documents: KnowledgeDocument[] }>(`/api/v1/knowledge-bases/${baseID}/documents`)).documents
+}
+
+export async function uploadKnowledgeDocument(
+  baseID: string,
+  file: File,
+  onProgress: (ratio: number) => void,
+): Promise<{ document: KnowledgeDocument; created: boolean }> {
+  const body = new FormData()
+  body.append('file', file)
+  return uploadWithProgress<{ document: KnowledgeDocument; created: boolean }>(`/api/v1/knowledge-bases/${baseID}/documents`, body, onProgress)
+}
+
+export async function retryKnowledgeDocument(baseID: string, documentID: string): Promise<KnowledgeDocument> {
+  return (await request<{ document: KnowledgeDocument }>(`/api/v1/knowledge-bases/${baseID}/documents/${documentID}/retry`, { method: 'POST' })).document
+}
+
+export async function reindexKnowledgeDocument(baseID: string, documentID: string): Promise<KnowledgeDocument> {
+  return (await request<{ document: KnowledgeDocument }>(`/api/v1/knowledge-bases/${baseID}/documents/${documentID}/reindex`, { method: 'POST' })).document
+}
+
+export async function deleteKnowledgeDocument(baseID: string, documentID: string): Promise<void> {
+  await request<unknown>(`/api/v1/knowledge-bases/${baseID}/documents/${documentID}`, { method: 'DELETE' })
+}
+
+export async function downloadKnowledgeDocument(baseID: string, documentID: string, filename: string): Promise<void> {
+  const response = await fetchAuthorized(`/api/v1/knowledge-bases/${baseID}/documents/${documentID}/content`)
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ msg: `下载失败 (${response.status})` })) as Partial<ApiResponse<unknown>>
+    throw new Error(body.msg || `下载失败 (${response.status})`)
+  }
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function uploadWithProgress<T>(path: string, body: FormData, onProgress: (ratio: number) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', path)
+    xhr.withCredentials = true
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded / event.total)
+    }
+    xhr.onload = () => {
+      const payload = JSON.parse(xhr.responseText || '{}') as ApiResponse<T>
+      if (xhr.status >= 200 && xhr.status < 300 && payload.code === 0) {
+        onProgress(1)
+        resolve(payload.data)
+        return
+      }
+      reject(new Error(payload.msg || `请求失败 (${xhr.status})`))
+    }
+    xhr.onerror = () => reject(new Error('上传失败，请检查网络后重试'))
+    xhr.send(body)
+  })
 }
 
 export async function downloadAttachment(conversationID: string, attachment: Attachment): Promise<void> {
