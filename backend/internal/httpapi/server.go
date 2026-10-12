@@ -150,6 +150,7 @@ func NewServerWithEmbeddingGateway(repositories *repository.Repositories, jwtMan
 		ContextTokenBudget:  cfg.Knowledge.RetrievalContextTokenBudget,
 		MaxKnowledgeBases:   cfg.Knowledge.RetrievalMaxKnowledgeBases,
 		MaxQueryChars:       cfg.Knowledge.RetrievalMaxQueryChars,
+		TraceEnabled:        cfg.Knowledge.RetrievalTraceEnabled,
 	})
 	chatService.ConfigureKnowledgeRetrieval(retrievalService)
 	handlers.ConfigureKnowledgeRetrieval(retrievalService)

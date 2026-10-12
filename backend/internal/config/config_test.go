@@ -214,6 +214,7 @@ func TestLoadKnowledgeConfigUsesTokenUnitsAndValidatesOverlap(t *testing.T) {
 }
 
 func TestLoadKnowledgeRetrievalConfigValidation(t *testing.T) {
+	t.Setenv("RAG_RETRIEVAL_TRACE_ENABLED", "true")
 	t.Setenv("RAG_RETRIEVAL_CANDIDATE_LIMIT", "20")
 	t.Setenv("RAG_RETRIEVAL_TOP_K", "6")
 	t.Setenv("RAG_RETRIEVAL_SIMILARITY_THRESHOLD", "0.42")
@@ -221,7 +222,7 @@ func TestLoadKnowledgeRetrievalConfigValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.RetrievalCandidateLimit != 20 || config.RetrievalTopK != 6 || config.RetrievalSimilarityThreshold != 0.42 {
+	if config.RetrievalCandidateLimit != 20 || config.RetrievalTopK != 6 || config.RetrievalSimilarityThreshold != 0.42 || !config.RetrievalTraceEnabled {
 		t.Fatalf("unexpected retrieval config: %+v", config)
 	}
 	t.Setenv("RAG_RETRIEVAL_TOP_K", "21")

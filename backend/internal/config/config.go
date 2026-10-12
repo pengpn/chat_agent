@@ -80,6 +80,7 @@ type KnowledgeConfig struct {
 	RetrievalContextTokenBudget  int64
 	RetrievalMaxKnowledgeBases   int
 	RetrievalMaxQueryChars       int
+	RetrievalTraceEnabled        bool
 }
 
 type Config struct {
@@ -662,6 +663,10 @@ func loadKnowledgeConfig() (KnowledgeConfig, error) {
 	if err != nil {
 		return KnowledgeConfig{}, err
 	}
+	traceEnabled, err := boolEnv("RAG_RETRIEVAL_TRACE_ENABLED", false)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
 	return KnowledgeConfig{
 		DocumentMaxBytes: maxBytes, MaxTextChars: maxTextChars,
 		ChunkTargetTokens: target, ChunkOverlap: overlap, ChunkMinTokens: minimum,
@@ -669,6 +674,7 @@ func loadKnowledgeConfig() (KnowledgeConfig, error) {
 		RetrievalCandidateLimit: candidateLimit, RetrievalTopK: topK,
 		RetrievalSimilarityThreshold: similarityThreshold, RetrievalContextTokenBudget: contextTokenBudget,
 		RetrievalMaxKnowledgeBases: maxKnowledgeBases, RetrievalMaxQueryChars: maxQueryChars,
+		RetrievalTraceEnabled: traceEnabled,
 	}, nil
 }
 

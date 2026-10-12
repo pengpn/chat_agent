@@ -22,6 +22,41 @@ type KnowledgeRetrievalConfig struct {
 	ContextTokenBudget  int64
 	MaxKnowledgeBases   int
 	MaxQueryChars       int
+	TraceEnabled        bool
+}
+
+// KnowledgeRetrievalTrace 是检索诊断快照，可能包含用户文档原文。
+// 调用方只能将其保存在有访问控制的位置。
+type KnowledgeRetrievalTrace struct {
+	Query              string                    `json:"query"`
+	KnowledgeBaseIDs   []string                  `json:"knowledgeBaseIds"`
+	Candidates         []KnowledgeCandidateTrace `json:"candidates"`
+	SelectedChunkIDs   []string                  `json:"selectedChunkIds"`
+	EmbeddingProvider  string                    `json:"embeddingProvider"`
+	EmbeddingModel     string                    `json:"embeddingModel"`
+	EmbeddingDimension int                       `json:"embeddingDimension"`
+	PromptVersion      string                    `json:"promptVersion"`
+	CandidateLimit     int                       `json:"candidateLimit"`
+	TopK               int                       `json:"topK"`
+	Threshold          float64                   `json:"threshold"`
+	ContextTokenBudget int64                     `json:"contextTokenBudget"`
+	EmbeddingMS        int64                     `json:"embeddingMs"`
+	SearchMS           int64                     `json:"searchMs"`
+	TotalMS            int64                     `json:"totalMs"`
+}
+
+type KnowledgeCandidateTrace struct {
+	Rank            int     `json:"rank"`
+	KnowledgeBaseID string  `json:"knowledgeBaseId"`
+	DocumentID      string  `json:"documentId"`
+	DocumentName    string  `json:"documentName"`
+	ChunkID         string  `json:"chunkId"`
+	ChunkIndex      int     `json:"chunkIndex"`
+	Content         string  `json:"content"`
+	ContentHash     string  `json:"contentHash"`
+	TokenCount      int64   `json:"tokenCount"`
+	Similarity      float64 `json:"similarity"`
+	Decision        string  `json:"decision"`
 }
 
 type KnowledgeRetrievalRequest struct {
@@ -56,8 +91,8 @@ type KnowledgeRetrievalResult struct {
 	EmbeddingDimension int                       `json:"embeddingDimension"`
 }
 
-// KnowledgeRetrievalService is intentionally separate from ingestion. It
-// proves retrieval quality without coupling search to chat generation.
+// KnowledgeRetrievalService 与文档摄取分开，便于独立评估检索质量，
+// 不必将检索与对话生成绑定。
 type KnowledgeRetrievalService struct {
 	repository repository.KnowledgeRepository
 	embeddings embeddinggateway.Gateway
@@ -91,87 +126,83 @@ func NewKnowledgeRetrieval(repository repository.KnowledgeRepository, embeddings
 }
 
 func (s *KnowledgeRetrievalService) Search(ctx context.Context, userID string, request KnowledgeRetrievalRequest) (KnowledgeRetrievalResult, error) {
+	result, _, err := s.search(ctx, userID, request, s.config.TraceEnabled)
+	return result, err
+}
+
+// SearchWithTrace 复用线上检索路径，返回每个候选片段的筛选结果供离线评估。
+// 诊断快照不会暴露给 HTTP 接口。
+func (s *KnowledgeRetrievalService) SearchWithTrace(ctx context.Context, userID string, request KnowledgeRetrievalRequest) (KnowledgeRetrievalResult, KnowledgeRetrievalTrace, error) {
+	return s.search(ctx, userID, request, true)
+}
+
+func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, request KnowledgeRetrievalRequest, captureTrace bool) (KnowledgeRetrievalResult, KnowledgeRetrievalTrace, error) {
 	started := time.Now()
 	query := strings.TrimSpace(request.Query)
 	if query == "" {
-		return KnowledgeRetrievalResult{}, ErrKnowledgeQueryRequired
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrKnowledgeQueryRequired
 	}
 	if len([]rune(query)) > s.config.MaxQueryChars {
-		return KnowledgeRetrievalResult{}, ErrKnowledgeQueryTooLong
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrKnowledgeQueryTooLong
 	}
 	baseIDs := uniqueStrings(request.KnowledgeBaseIDs)
 	if len(baseIDs) == 0 {
-		return KnowledgeRetrievalResult{}, ErrKnowledgeBasesRequired
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrKnowledgeBasesRequired
 	}
 	if len(baseIDs) > s.config.MaxKnowledgeBases {
-		return KnowledgeRetrievalResult{}, ErrTooManyKnowledgeBases
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrTooManyKnowledgeBases
 	}
 	for _, baseID := range baseIDs {
 		if err := uuid.Validate(baseID); err != nil {
-			return KnowledgeRetrievalResult{}, ErrInvalidKnowledgeBaseID
+			return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrInvalidKnowledgeBaseID
 		}
 	}
 	owned, err := s.repository.CountOwnedBases(ctx, userID, baseIDs)
 	if err != nil {
-		return KnowledgeRetrievalResult{}, err
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, err
 	}
 	if owned != int64(len(baseIDs)) {
-		return KnowledgeRetrievalResult{}, ErrKnowledgeBaseNotFound
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrKnowledgeBaseNotFound
 	}
 	if s.embeddings == nil {
-		return KnowledgeRetrievalResult{}, ErrEmbeddingNotConfigured
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrEmbeddingNotConfigured
 	}
+	embeddingStarted := time.Now()
 	embedded, err := s.embeddings.EmbedQuery(ctx, embeddinggateway.Request{
 		OperationID: "knowledge-query:" + uuid.NewString(), Purpose: "rag_query",
 		UserID: userID, Texts: []string{query},
 	})
 	if err != nil {
-		return KnowledgeRetrievalResult{}, fmt.Errorf("%w: %v", ErrKnowledgeRetrievalFailed, err)
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, fmt.Errorf("%w: %v", ErrKnowledgeRetrievalFailed, err)
 	}
+	embeddingMS := time.Since(embeddingStarted).Milliseconds()
 	if len(embedded.Vectors) != 1 || embedded.Dimension <= 0 || len(embedded.Vectors[0].Values) != embedded.Dimension || embedded.Provider == "" || embedded.Model == "" {
-		return KnowledgeRetrievalResult{}, fmt.Errorf("%w: invalid query embedding result", ErrKnowledgeRetrievalFailed)
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, fmt.Errorf("%w: invalid query embedding result", ErrKnowledgeRetrievalFailed)
 	}
 	queryVector := pgvector.NewVector(embedded.Vectors[0].Values)
+	searchStarted := time.Now()
 	candidates, err := s.repository.SearchChunksExact(ctx, userID, baseIDs, embedded.Provider, embedded.Model, embedded.Dimension, s.config.CandidateLimit, queryVector)
 	if err != nil {
-		return KnowledgeRetrievalResult{}, fmt.Errorf("%w: %v", ErrKnowledgeRetrievalFailed, err)
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, fmt.Errorf("%w: %v", ErrKnowledgeRetrievalFailed, err)
 	}
-	result := KnowledgeRetrievalResult{
-		Matches: make([]KnowledgeRetrievalMatch, 0, s.config.TopK), CandidateCount: len(candidates),
-		ContextTokenBudget: s.config.ContextTokenBudget, EmbeddingProvider: embedded.Provider,
-		EmbeddingModel: embedded.Model, EmbeddingDimension: embedded.Dimension,
-	}
-	for _, candidate := range candidates {
-		if math.IsNaN(candidate.Similarity) || math.IsInf(candidate.Similarity, 0) || candidate.Similarity < s.config.SimilarityThreshold {
-			continue
+	searchMS := time.Since(searchStarted).Milliseconds()
+	result, decisions := SelectKnowledgeCandidates(candidates, s.estimator, s.config)
+	result.EmbeddingProvider, result.EmbeddingModel, result.EmbeddingDimension = embedded.Provider, embedded.Model, embedded.Dimension
+	trace := KnowledgeRetrievalTrace{}
+	if captureTrace {
+		trace = KnowledgeRetrievalTrace{
+			Query: query, KnowledgeBaseIDs: baseIDs, Candidates: decisions,
+			EmbeddingProvider: embedded.Provider, EmbeddingModel: embedded.Model, EmbeddingDimension: embedded.Dimension,
+			PromptVersion: groundingPromptVersion, CandidateLimit: s.config.CandidateLimit, TopK: s.config.TopK,
+			Threshold: s.config.SimilarityThreshold, ContextTokenBudget: s.config.ContextTokenBudget,
+			EmbeddingMS: embeddingMS, SearchMS: searchMS, TotalMS: time.Since(started).Milliseconds(),
 		}
-		contentTokens := candidate.TokenCount
-		if contentTokens <= 0 {
-			contentTokens = s.estimator.Estimate(candidate.Content)
+		for _, match := range result.Matches {
+			trace.SelectedChunkIDs = append(trace.SelectedChunkIDs, match.ChunkID)
 		}
-		overhead := s.estimator.Estimate(fmt.Sprintf("[来源：%s，第 %d 个片段]", candidate.DocumentName, candidate.ChunkIndex+1))
-		contextTokens := contentTokens + overhead
-		if contextTokens > s.config.ContextTokenBudget-result.UsedContextTokens {
-			continue
-		}
-		metadata := make(map[string]any)
-		if len(candidate.Metadata) > 0 {
-			if unmarshalErr := json.Unmarshal(candidate.Metadata, &metadata); unmarshalErr != nil {
-				metadata = nil
-			}
-		}
-		result.UsedContextTokens += contextTokens
-		result.Matches = append(result.Matches, KnowledgeRetrievalMatch{
-			Rank: len(result.Matches) + 1, KnowledgeBaseID: candidate.KnowledgeBaseID,
-			DocumentID: candidate.DocumentID, DocumentName: candidate.DocumentName,
-			ChunkID: candidate.ChunkID, ChunkIndex: candidate.ChunkIndex,
-			Content: candidate.Content, ContentHash: candidate.ContentHash,
-			TokenCount: contentTokens, ContextTokens: contextTokens,
-			PageNumber: candidate.PageNumber, SectionTitle: candidate.SectionTitle,
-			Metadata: metadata, Similarity: candidate.Similarity,
-		})
-		if len(result.Matches) >= s.config.TopK {
-			break
+		if s.config.TraceEnabled {
+			logger.Info(ctx, "knowledge retrieval trace", logger.String("user_id", userID),
+				logger.Any("trace", trace))
 		}
 	}
 	logger.Info(ctx, "knowledge retrieval completed",
@@ -180,5 +211,61 @@ func (s *KnowledgeRetrievalService) Search(ctx context.Context, userID string, r
 		logger.Int64("context_tokens", result.UsedContextTokens), logger.Int64("context_token_budget", s.config.ContextTokenBudget),
 		logger.String("embedding_provider", embedded.Provider), logger.String("embedding_model", embedded.Model),
 		logger.Int("embedding_dimension", embedded.Dimension), logger.Int64("duration_ms", time.Since(started).Milliseconds()))
-	return result, nil
+	return result, trace, nil
+}
+
+// SelectKnowledgeCandidates 由线上检索和离线重放共用。
+// 传入的候选片段必须已按数据库的精确向量检索结果排序。
+func SelectKnowledgeCandidates(candidates []repository.KnowledgeSearchRow, estimator embeddinggateway.TokenEstimator, cfg KnowledgeRetrievalConfig) (KnowledgeRetrievalResult, []KnowledgeCandidateTrace) {
+	if estimator == nil {
+		estimator = embeddinggateway.HeuristicTokenEstimator{}
+	}
+	result := KnowledgeRetrievalResult{Matches: make([]KnowledgeRetrievalMatch, 0), CandidateCount: len(candidates), ContextTokenBudget: cfg.ContextTokenBudget}
+	decisions := make([]KnowledgeCandidateTrace, 0, len(candidates))
+	for index, candidate := range candidates {
+		decision := KnowledgeCandidateTrace{
+			Rank: index + 1, KnowledgeBaseID: candidate.KnowledgeBaseID, DocumentID: candidate.DocumentID,
+			DocumentName: candidate.DocumentName, ChunkID: candidate.ChunkID, ChunkIndex: candidate.ChunkIndex,
+			Content: candidate.Content, ContentHash: candidate.ContentHash, TokenCount: candidate.TokenCount,
+			Similarity: candidate.Similarity,
+		}
+		switch {
+		case len(result.Matches) >= cfg.TopK:
+			decision.Decision = "top_k_reached"
+		case math.IsNaN(candidate.Similarity) || math.IsInf(candidate.Similarity, 0):
+			decision.Decision = "invalid_score"
+		case candidate.Similarity < cfg.SimilarityThreshold:
+			decision.Decision = "below_threshold"
+		default:
+			contentTokens := candidate.TokenCount
+			if contentTokens <= 0 {
+				contentTokens = estimator.Estimate(candidate.Content)
+			}
+			overhead := estimator.Estimate(fmt.Sprintf("[来源：%s，第 %d 个片段]", candidate.DocumentName, candidate.ChunkIndex+1))
+			contextTokens := contentTokens + overhead
+			if contextTokens > cfg.ContextTokenBudget-result.UsedContextTokens {
+				decision.Decision = "over_budget"
+				break
+			}
+			metadata := make(map[string]any)
+			if len(candidate.Metadata) > 0 {
+				if err := json.Unmarshal(candidate.Metadata, &metadata); err != nil {
+					metadata = nil
+				}
+			}
+			result.UsedContextTokens += contextTokens
+			result.Matches = append(result.Matches, KnowledgeRetrievalMatch{
+				Rank: len(result.Matches) + 1, KnowledgeBaseID: candidate.KnowledgeBaseID,
+				DocumentID: candidate.DocumentID, DocumentName: candidate.DocumentName,
+				ChunkID: candidate.ChunkID, ChunkIndex: candidate.ChunkIndex,
+				Content: candidate.Content, ContentHash: candidate.ContentHash,
+				TokenCount: contentTokens, ContextTokens: contextTokens,
+				PageNumber: candidate.PageNumber, SectionTitle: candidate.SectionTitle,
+				Metadata: metadata, Similarity: candidate.Similarity,
+			})
+			decision.Decision = "selected"
+		}
+		decisions = append(decisions, decision)
+	}
+	return result, decisions
 }

@@ -89,3 +89,31 @@ func TestKnowledgeRetrievalRejectsMalformedBaseID(t *testing.T) {
 		t.Fatalf("error = %v, want ErrInvalidKnowledgeBaseID", err)
 	}
 }
+
+func TestKnowledgeRetrievalTraceRecordsCandidateDecisions(t *testing.T) {
+	repo := newFakeKnowledgeRepository()
+	repo.base.ID = retrievalTestBaseID
+	repo.searchRows = []repository.KnowledgeSearchRow{
+		{KnowledgeBaseID: retrievalTestBaseID, DocumentID: "doc-1", DocumentName: "规则", ChunkID: "chunk-1", Content: "证据", TokenCount: 2, Similarity: 0.9},
+		{KnowledgeBaseID: retrievalTestBaseID, DocumentID: "doc-2", DocumentName: "规则", ChunkID: "chunk-2", Content: "弱相关", TokenCount: 2, Similarity: 0.2},
+		{KnowledgeBaseID: retrievalTestBaseID, DocumentID: "doc-3", DocumentName: "规则", ChunkID: "chunk-3", Content: "长证据", TokenCount: 20, Similarity: 0.8},
+	}
+	svc := NewKnowledgeRetrieval(repo, &fakeEmbeddingGateway{}, retrievalFixedEstimator(1), KnowledgeRetrievalConfig{
+		CandidateLimit: 3, TopK: 2, SimilarityThreshold: 0.5, ContextTokenBudget: 5,
+	})
+	_, trace, err := svc.SearchWithTrace(context.Background(), "user-1", KnowledgeRetrievalRequest{
+		Query: "规则是什么？", KnowledgeBaseIDs: []string{retrievalTestBaseID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Query != "规则是什么？" || trace.EmbeddingModel != "embedding-v1" || trace.PromptVersion != groundingPromptVersion || len(trace.Candidates) != 3 {
+		t.Fatalf("incomplete trace: %+v", trace)
+	}
+	if trace.Candidates[0].Decision != "selected" || trace.Candidates[1].Decision != "below_threshold" || trace.Candidates[2].Decision != "over_budget" {
+		t.Fatalf("unexpected candidate decisions: %+v", trace.Candidates)
+	}
+	if len(trace.SelectedChunkIDs) != 1 || trace.SelectedChunkIDs[0] != "chunk-1" || trace.EmbeddingMS < 0 || trace.SearchMS < 0 {
+		t.Fatalf("unexpected selection or latency: %+v", trace)
+	}
+}

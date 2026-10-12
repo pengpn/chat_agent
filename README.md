@@ -19,6 +19,8 @@
 - [RAG 第三阶段：文档摄取流水线](./docs/rag-03-document-ingestion.md)
 - [RAG 第四阶段：权限过滤的向量检索](./docs/rag-04-permission-filtered-vector-retrieval.md)
 - [RAG 第五阶段：Grounded Generation 与文档引用](./docs/rag-05-grounded-generation-and-citations.md)
+- [RAG 第六阶段：知识库与引用前端体验](./docs/rag-06-knowledge-and-citation-ui.md)
+- [RAG 第七阶段：离线评估与进阶检索决策](./docs/rag-07-evaluation-and-advanced-retrieval.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -49,6 +51,7 @@
 - RAG 文档摄取：知识库 CRUD、异步状态机、TXT/PDF/DOCX 结构提取、Token 分块、向量落库、幂等重试和对象删除补偿
 - RAG 精确向量检索：查询向量化、用户/知识库权限过滤、模型版本匹配、余弦 Top-K、相关性阈值和上下文 Token 预算
 - RAG 引用回答：服务端知识库选择、证据约束 Prompt、引用白名单校验、事务快照和可重连 SSE 引用事件
+- RAG 离线评估：真实候选快照、Recall@K/MRR/nDCG、人工复核的忠实度与引用指标、参数重放和逐题失败归因
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
@@ -109,7 +112,7 @@ frontend/src/                 # Vue 3 对话 UI
 
 Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository` 是接口，`GormUserRepository` 是实现。Service 依赖接口，因此单测仍可注入 fake 实现，而无需连接数据库。
 
-RAG 当前已完成数据基础、EmbeddingGateway、文档摄取、权限过滤检索，以及 Grounded Generation 与引用快照。Chat 请求只提交服务端知识库 ID；后端检索后把片段编成稳定的 `[n]` 证据，作为不可信数据注入模型上下文。模型完成后按本次检索结果校验编号，只把正文实际使用的来源与 assistant 终态事务性保存。流式回答会在终态前发送可按 sequence 重放的 `citations` 事件。详细设计见 [RAG 第一阶段](./docs/rag-01-domain-and-pgvector.md)、[RAG 第二阶段](./docs/rag-02-embedding-gateway.md)、[RAG 第三阶段](./docs/rag-03-document-ingestion.md)、[RAG 第四阶段](./docs/rag-04-permission-filtered-vector-retrieval.md)与 [RAG 第五阶段](./docs/rag-05-grounded-generation-and-citations.md)。下一阶段会增加普通用户可操作的知识库管理、对话选择和引用来源面板。
+RAG 当前已完成知识库管理、文档摄取、权限过滤的精确向量检索、引用约束回答和前端来源面板。`backend/cmd/rageval` 可以从真实知识库抓取候选快照，分别评估检索、排序和经人工复核的回答质量；示例数据为合成数据。进阶检索和 HNSW 等待真实评估集与规模数据证明收益，详见 [RAG 第七阶段](./docs/rag-07-evaluation-and-advanced-retrieval.md)。
 
 ## API 概览
 

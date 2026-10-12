@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-rag-v1",
+  "corpusVersion": "synthetic-policy-v1",
+  "cases": [
+    {
+      "id": "refund",
+      "query": "退款需要多久内申请？",
+      "goldAnswer": "收到商品后七天内可申请退款。",
+      "relevantDocuments": {"doc-refund": 3, "doc-faq": 1},
+      "expectedCitationDocumentIds": ["doc-refund"]
+    },
+    {
+      "id": "invoice",
+      "query": "如何申请电子发票？",
+      "goldAnswer": "在订单详情页提交开票信息。",
+      "relevantDocuments": {"doc-invoice": 3},
+      "expectedCitationDocumentIds": ["doc-invoice"]
+    },
+    {
+      "id": "shipping",
+      "query": "退货运费由谁承担？",
+      "goldAnswer": "商品质量问题由商家承担退货运费。",
+      "relevantDocuments": {"doc-shipping": 3},
+      "expectedCitationDocumentIds": ["doc-shipping"]
+    },
+    {
+      "id": "unknown",
+      "query": "会员积分可以兑换机票吗？",
+      "goldAnswer": "所选资料没有提供相关信息。",
+      "relevantDocuments": {},
+      "expectedCitationDocumentIds": []
+    }
+  ]
+}
