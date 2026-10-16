@@ -21,6 +21,7 @@
 - [RAG 第五阶段：Grounded Generation 与文档引用](./docs/rag-05-grounded-generation-and-citations.md)
 - [RAG 第六阶段：知识库与引用前端体验](./docs/rag-06-knowledge-and-citation-ui.md)
 - [RAG 第七阶段：离线评估与进阶检索决策](./docs/rag-07-evaluation-and-advanced-retrieval.md)
+- [RAG 第八阶段：关键词召回与 RRF 混合检索](./docs/rag-08-hybrid-retrieval-and-rrf.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -52,6 +53,7 @@
 - RAG 精确向量检索：查询向量化、用户/知识库权限过滤、模型版本匹配、余弦 Top-K、相关性阈值和上下文 Token 预算
 - RAG 引用回答：服务端知识库选择、证据约束 Prompt、引用白名单校验、事务快照和可重连 SSE 引用事件
 - RAG 离线评估：真实候选快照、Recall@K/MRR/nDCG、人工复核的忠实度与引用指标、参数重放和逐题失败归因
+- RAG 混合检索实验：中文轻量分词、PostgreSQL GIN 关键词召回、RRF 排名融合和双路诊断，默认仍使用向量基线
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 
@@ -112,7 +114,7 @@ frontend/src/                 # Vue 3 对话 UI
 
 Repository 接口与 GORM 实现均位于 `repository`：例如 `UserRepository` 是接口，`GormUserRepository` 是实现。Service 依赖接口，因此单测仍可注入 fake 实现，而无需连接数据库。
 
-RAG 当前已完成知识库管理、文档摄取、权限过滤的精确向量检索、引用约束回答和前端来源面板。`backend/cmd/rageval` 可以从真实知识库抓取候选快照，分别评估检索、排序和经人工复核的回答质量；示例数据为合成数据。进阶检索和 HNSW 等待真实评估集与规模数据证明收益，详见 [RAG 第七阶段](./docs/rag-07-evaluation-and-advanced-retrieval.md)。
+RAG 当前已完成知识库管理、文档摄取、权限过滤检索、引用约束回答和前端来源面板。`backend/cmd/rageval` 可以从真实知识库抓取候选快照，分别评估检索、排序和经人工复核的回答质量；示例数据为合成数据。混合检索通过 `RAG_RETRIEVAL_MODE=hybrid_rrf` 开启实验，默认保持精确向量基线；策略切换与 HNSW 仍需要真实指标证明收益，详见 [RAG 第七阶段](./docs/rag-07-evaluation-and-advanced-retrieval.md)与[第八阶段](./docs/rag-08-hybrid-retrieval-and-rrf.md)。
 
 ## API 概览
 

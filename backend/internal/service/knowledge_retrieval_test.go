@@ -55,7 +55,7 @@ func TestKnowledgeRetrievalRejectsUnauthorizedBaseBeforeEmbedding(t *testing.T) 
 	repositoryFake := newFakeKnowledgeRepository()
 	repositoryFake.base.ID = retrievalTestBaseID
 	embeddings := &fakeEmbeddingGateway{}
-	service := NewKnowledgeRetrieval(repositoryFake, embeddings, nil, KnowledgeRetrievalConfig{})
+	service := NewKnowledgeRetrieval(repositoryFake, embeddings, nil, KnowledgeRetrievalConfig{Mode: RetrievalModeHybrid})
 	_, err := service.Search(context.Background(), "user-1", KnowledgeRetrievalRequest{Query: "问题", KnowledgeBaseIDs: []string{"22222222-2222-2222-2222-222222222222"}})
 	if !errors.Is(err, ErrKnowledgeBaseNotFound) {
 		t.Fatalf("error = %v, want ErrKnowledgeBaseNotFound", err)
@@ -65,6 +65,9 @@ func TestKnowledgeRetrievalRejectsUnauthorizedBaseBeforeEmbedding(t *testing.T) 
 	embeddings.mu.Unlock()
 	if queryCalls != 0 {
 		t.Fatalf("embedding was called before ownership validation: %d", queryCalls)
+	}
+	if repositoryFake.keywordCalls != 0 {
+		t.Fatal("关键词查询不应在权限校验之前执行")
 	}
 }
 

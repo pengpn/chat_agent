@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/example/agent-platform/backend/internal/embeddinggateway"
+	"github.com/example/agent-platform/backend/internal/knowledgelex"
 	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/google/uuid"
@@ -23,26 +24,34 @@ type KnowledgeRetrievalConfig struct {
 	MaxKnowledgeBases   int
 	MaxQueryChars       int
 	TraceEnabled        bool
+	Mode                string
+	RRFK                int
 }
 
 // KnowledgeRetrievalTrace 是检索诊断快照，可能包含用户文档原文。
 // 调用方只能将其保存在有访问控制的位置。
 type KnowledgeRetrievalTrace struct {
-	Query              string                    `json:"query"`
-	KnowledgeBaseIDs   []string                  `json:"knowledgeBaseIds"`
-	Candidates         []KnowledgeCandidateTrace `json:"candidates"`
-	SelectedChunkIDs   []string                  `json:"selectedChunkIds"`
-	EmbeddingProvider  string                    `json:"embeddingProvider"`
-	EmbeddingModel     string                    `json:"embeddingModel"`
-	EmbeddingDimension int                       `json:"embeddingDimension"`
-	PromptVersion      string                    `json:"promptVersion"`
-	CandidateLimit     int                       `json:"candidateLimit"`
-	TopK               int                       `json:"topK"`
-	Threshold          float64                   `json:"threshold"`
-	ContextTokenBudget int64                     `json:"contextTokenBudget"`
-	EmbeddingMS        int64                     `json:"embeddingMs"`
-	SearchMS           int64                     `json:"searchMs"`
-	TotalMS            int64                     `json:"totalMs"`
+	Query                 string                    `json:"query"`
+	KnowledgeBaseIDs      []string                  `json:"knowledgeBaseIds"`
+	Candidates            []KnowledgeCandidateTrace `json:"candidates"`
+	SelectedChunkIDs      []string                  `json:"selectedChunkIds"`
+	EmbeddingProvider     string                    `json:"embeddingProvider"`
+	EmbeddingModel        string                    `json:"embeddingModel"`
+	EmbeddingDimension    int                       `json:"embeddingDimension"`
+	PromptVersion         string                    `json:"promptVersion"`
+	CandidateLimit        int                       `json:"candidateLimit"`
+	TopK                  int                       `json:"topK"`
+	Threshold             float64                   `json:"threshold"`
+	ContextTokenBudget    int64                     `json:"contextTokenBudget"`
+	EmbeddingMS           int64                     `json:"embeddingMs"`
+	SearchMS              int64                     `json:"searchMs"`
+	TotalMS               int64                     `json:"totalMs"`
+	RetrievalMode         string                    `json:"retrievalMode"`
+	RRFK                  int                       `json:"rrfK,omitempty"`
+	VectorCandidateCount  int                       `json:"vectorCandidateCount"`
+	KeywordCandidateCount int                       `json:"keywordCandidateCount"`
+	KeywordTerms          []string                  `json:"keywordTerms,omitempty"`
+	KeywordSearchMS       int64                     `json:"keywordSearchMs"`
 }
 
 type KnowledgeCandidateTrace struct {
@@ -57,6 +66,10 @@ type KnowledgeCandidateTrace struct {
 	TokenCount      int64   `json:"tokenCount"`
 	Similarity      float64 `json:"similarity"`
 	Decision        string  `json:"decision"`
+	VectorRank      int     `json:"vectorRank,omitempty"`
+	KeywordRank     int     `json:"keywordRank,omitempty"`
+	KeywordScore    float64 `json:"keywordScore,omitempty"`
+	FusionScore     float64 `json:"fusionScore,omitempty"`
 }
 
 type KnowledgeRetrievalRequest struct {
@@ -79,6 +92,10 @@ type KnowledgeRetrievalMatch struct {
 	SectionTitle    string         `json:"sectionTitle,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
 	Similarity      float64        `json:"similarity"`
+	VectorRank      int            `json:"vectorRank,omitempty"`
+	KeywordRank     int            `json:"keywordRank,omitempty"`
+	KeywordScore    float64        `json:"keywordScore,omitempty"`
+	FusionScore     float64        `json:"fusionScore,omitempty"`
 }
 
 type KnowledgeRetrievalResult struct {
@@ -89,6 +106,7 @@ type KnowledgeRetrievalResult struct {
 	EmbeddingProvider  string                    `json:"embeddingProvider"`
 	EmbeddingModel     string                    `json:"embeddingModel"`
 	EmbeddingDimension int                       `json:"embeddingDimension"`
+	RetrievalMode      string                    `json:"retrievalMode"`
 }
 
 // KnowledgeRetrievalService 与文档摄取分开，便于独立评估检索质量，
@@ -101,6 +119,12 @@ type KnowledgeRetrievalService struct {
 }
 
 func NewKnowledgeRetrieval(repository repository.KnowledgeRepository, embeddings embeddinggateway.Gateway, estimator chunkTokenEstimator, cfg KnowledgeRetrievalConfig) *KnowledgeRetrievalService {
+	if cfg.Mode == "" {
+		cfg.Mode = RetrievalModeVector
+	}
+	if cfg.RRFK <= 0 {
+		cfg.RRFK = 60
+	}
 	if cfg.CandidateLimit <= 0 {
 		cfg.CandidateLimit = 30
 	}
@@ -186,8 +210,22 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, fmt.Errorf("%w: %v", ErrKnowledgeRetrievalFailed, err)
 	}
 	searchMS := time.Since(searchStarted).Milliseconds()
+	vectorCandidateCount := len(candidates)
+	keywordCandidateCount := 0
+	keywordSearchMS := int64(0)
+	if s.config.Mode == RetrievalModeHybrid {
+		keywordStarted := time.Now()
+		keyword, keywordErr := s.repository.SearchChunksKeyword(ctx, userID, baseIDs, embedded.Provider, embedded.Model, embedded.Dimension, s.config.CandidateLimit, query, queryVector)
+		if keywordErr != nil {
+			return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, fmt.Errorf("%w: keyword search: %v", ErrKnowledgeRetrievalFailed, keywordErr)
+		}
+		keywordCandidateCount = len(keyword)
+		keywordSearchMS = time.Since(keywordStarted).Milliseconds()
+		candidates = FuseKnowledgeCandidates(candidates, keyword, s.config.RRFK)
+	}
 	result, decisions := SelectKnowledgeCandidates(candidates, s.estimator, s.config)
 	result.EmbeddingProvider, result.EmbeddingModel, result.EmbeddingDimension = embedded.Provider, embedded.Model, embedded.Dimension
+	result.RetrievalMode = s.config.Mode
 	trace := KnowledgeRetrievalTrace{}
 	if captureTrace {
 		trace = KnowledgeRetrievalTrace{
@@ -196,6 +234,12 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 			PromptVersion: groundingPromptVersion, CandidateLimit: s.config.CandidateLimit, TopK: s.config.TopK,
 			Threshold: s.config.SimilarityThreshold, ContextTokenBudget: s.config.ContextTokenBudget,
 			EmbeddingMS: embeddingMS, SearchMS: searchMS, TotalMS: time.Since(started).Milliseconds(),
+			RetrievalMode: s.config.Mode, RRFK: s.config.RRFK,
+			VectorCandidateCount: vectorCandidateCount, KeywordCandidateCount: keywordCandidateCount,
+			KeywordSearchMS: keywordSearchMS,
+		}
+		if s.config.Mode == RetrievalModeHybrid {
+			trace.KeywordTerms = knowledgelex.QueryTerms(query)
 		}
 		for _, match := range result.Matches {
 			trace.SelectedChunkIDs = append(trace.SelectedChunkIDs, match.ChunkID)
@@ -208,6 +252,8 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 	logger.Info(ctx, "knowledge retrieval completed",
 		logger.String("user_id", userID), logger.Int("knowledge_base_count", len(baseIDs)),
 		logger.Int("candidate_count", len(candidates)), logger.Int("result_count", len(result.Matches)),
+		logger.String("retrieval_mode", s.config.Mode), logger.Int("vector_candidate_count", vectorCandidateCount),
+		logger.Int("keyword_candidate_count", keywordCandidateCount), logger.Int64("keyword_search_ms", keywordSearchMS),
 		logger.Int64("context_tokens", result.UsedContextTokens), logger.Int64("context_token_budget", s.config.ContextTokenBudget),
 		logger.String("embedding_provider", embedded.Provider), logger.String("embedding_model", embedded.Model),
 		logger.Int("embedding_dimension", embedded.Dimension), logger.Int64("duration_ms", time.Since(started).Milliseconds()))
@@ -215,7 +261,7 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 }
 
 // SelectKnowledgeCandidates 由线上检索和离线重放共用。
-// 传入的候选片段必须已按数据库的精确向量检索结果排序。
+// 传入的候选片段必须已按余弦相似度或 RRF 融合结果排好序。
 func SelectKnowledgeCandidates(candidates []repository.KnowledgeSearchRow, estimator embeddinggateway.TokenEstimator, cfg KnowledgeRetrievalConfig) (KnowledgeRetrievalResult, []KnowledgeCandidateTrace) {
 	if estimator == nil {
 		estimator = embeddinggateway.HeuristicTokenEstimator{}
@@ -228,13 +274,15 @@ func SelectKnowledgeCandidates(candidates []repository.KnowledgeSearchRow, estim
 			DocumentName: candidate.DocumentName, ChunkID: candidate.ChunkID, ChunkIndex: candidate.ChunkIndex,
 			Content: candidate.Content, ContentHash: candidate.ContentHash, TokenCount: candidate.TokenCount,
 			Similarity: candidate.Similarity,
+			VectorRank: candidate.VectorRank, KeywordRank: candidate.KeywordRank,
+			KeywordScore: candidate.KeywordScore, FusionScore: candidate.FusionScore,
 		}
 		switch {
 		case len(result.Matches) >= cfg.TopK:
 			decision.Decision = "top_k_reached"
 		case math.IsNaN(candidate.Similarity) || math.IsInf(candidate.Similarity, 0):
 			decision.Decision = "invalid_score"
-		case candidate.Similarity < cfg.SimilarityThreshold:
+		case candidate.Similarity < cfg.SimilarityThreshold && !(cfg.Mode == RetrievalModeHybrid && candidate.KeywordRank > 0 && candidate.KeywordScore > 0):
 			decision.Decision = "below_threshold"
 		default:
 			contentTokens := candidate.TokenCount
@@ -262,6 +310,8 @@ func SelectKnowledgeCandidates(candidates []repository.KnowledgeSearchRow, estim
 				TokenCount: contentTokens, ContextTokens: contextTokens,
 				PageNumber: candidate.PageNumber, SectionTitle: candidate.SectionTitle,
 				Metadata: metadata, Similarity: candidate.Similarity,
+				VectorRank: candidate.VectorRank, KeywordRank: candidate.KeywordRank,
+				KeywordScore: candidate.KeywordScore, FusionScore: candidate.FusionScore,
 			})
 			decision.Decision = "selected"
 		}

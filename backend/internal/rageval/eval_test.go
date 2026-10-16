@@ -125,6 +125,30 @@ func TestFingerprintSourceDocumentsIgnoresInputOrder(t *testing.T) {
 	}
 }
 
+func TestHybridEvaluationRebuildsRRFAndRetainsKeywordOnlyCandidates(t *testing.T) {
+	dataset, baseline, _ := fixture(t)
+	data, err := os.ReadFile("../../eval/rag/demo-hybrid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hybrid Snapshot
+	if err := json.Unmarshal(data, &hybrid); err != nil {
+		t.Fatal(err)
+	}
+	reports, err := Compare(dataset, []Snapshot{baseline, hybrid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNear(t, reports[1].RecallAtK, 1)
+	if reports[1].GenerationGraded != 0 || reports[1].MeanKeywordSearchMS != 2 || reports[1].Cases[1].SelectedChunkIDs[0] != "invoice-1" {
+		t.Fatalf("混合候选重放失败: %+v", reports[1])
+	}
+	hybrid.Cases[0].Candidates[0].VectorRank = 10
+	if _, err := Evaluate(dataset, hybrid); err == nil {
+		t.Fatal("候选排名必须在每路候选上限以内")
+	}
+}
+
 func assertNear(t *testing.T, actual, expected float64) {
 	t.Helper()
 	if math.Abs(actual-expected) > 1e-9 {

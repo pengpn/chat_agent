@@ -214,6 +214,8 @@ func TestLoadKnowledgeConfigUsesTokenUnitsAndValidatesOverlap(t *testing.T) {
 }
 
 func TestLoadKnowledgeRetrievalConfigValidation(t *testing.T) {
+	t.Setenv("RAG_RETRIEVAL_MODE", "hybrid_rrf")
+	t.Setenv("RAG_RETRIEVAL_RRF_K", "70")
 	t.Setenv("RAG_RETRIEVAL_TRACE_ENABLED", "true")
 	t.Setenv("RAG_RETRIEVAL_CANDIDATE_LIMIT", "20")
 	t.Setenv("RAG_RETRIEVAL_TOP_K", "6")
@@ -222,7 +224,7 @@ func TestLoadKnowledgeRetrievalConfigValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.RetrievalCandidateLimit != 20 || config.RetrievalTopK != 6 || config.RetrievalSimilarityThreshold != 0.42 || !config.RetrievalTraceEnabled {
+	if config.RetrievalCandidateLimit != 20 || config.RetrievalTopK != 6 || config.RetrievalSimilarityThreshold != 0.42 || !config.RetrievalTraceEnabled || config.RetrievalMode != "hybrid_rrf" || config.RetrievalRRFK != 70 {
 		t.Fatalf("unexpected retrieval config: %+v", config)
 	}
 	t.Setenv("RAG_RETRIEVAL_TOP_K", "21")
@@ -233,6 +235,18 @@ func TestLoadKnowledgeRetrievalConfigValidation(t *testing.T) {
 	t.Setenv("RAG_RETRIEVAL_SIMILARITY_THRESHOLD", "1.1")
 	if _, err := loadKnowledgeConfig(); err == nil {
 		t.Fatal("expected similarity threshold above one to fail")
+	}
+}
+
+func TestKnowledgeHybridConfigRejectsInvalidModeAndRankConstant(t *testing.T) {
+	t.Setenv("RAG_RETRIEVAL_MODE", "unknown")
+	if _, err := loadKnowledgeConfig(); err == nil {
+		t.Fatal("未知检索方式应报错")
+	}
+	t.Setenv("RAG_RETRIEVAL_MODE", "hybrid_rrf")
+	t.Setenv("RAG_RETRIEVAL_RRF_K", "0")
+	if _, err := loadKnowledgeConfig(); err == nil {
+		t.Fatal("RRF 常数必须为正数")
 	}
 }
 

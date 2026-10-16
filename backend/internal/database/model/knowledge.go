@@ -54,15 +54,16 @@ type KnowledgeDocument struct {
 	UpdatedAt          time.Time      `json:"updatedAt"`
 }
 
-// KnowledgeChunk is the smallest retrievable unit. Embedding is nullable
-// while ingestion is in progress. An unconstrained vector column lets the
-// next stage configure the embedding model and dimension explicitly.
+// KnowledgeChunk 是最小检索单元，保存正文、关键词分词版本和向量版本。
+// 摄取过程中向量可以为空；关键词文本由 Repository 在写入时同步计算。
 type KnowledgeChunk struct {
 	ID                 string             `json:"id" gorm:"type:uuid;default:gen_random_uuid();primaryKey"`
 	DocumentID         string             `json:"documentId" gorm:"type:uuid;not null;uniqueIndex:knowledge_chunks_document_index_idx,priority:1;index"`
 	Document           *KnowledgeDocument `json:"-" gorm:"foreignKey:DocumentID;references:ID;constraint:OnDelete:CASCADE"`
 	ChunkIndex         int                `json:"chunkIndex" gorm:"not null;uniqueIndex:knowledge_chunks_document_index_idx,priority:2"`
 	Content            string             `json:"content" gorm:"type:text;not null"`
+	KeywordText        string             `json:"-" gorm:"type:text;not null;default:''"`
+	KeywordVersion     int                `json:"-" gorm:"not null;default:0"`
 	ContentHash        string             `json:"contentHash" gorm:"type:char(64);not null"`
 	TokenCount         int64              `json:"tokenCount" gorm:"not null;default:0"`
 	PageNumber         *int               `json:"pageNumber,omitempty"`

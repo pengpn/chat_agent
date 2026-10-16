@@ -12,9 +12,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// KnowledgeSearchRow is a read model for exact vector retrieval. It contains
-// source metadata needed by later citation generation, but never exposes the
-// raw embedding vector to the HTTP layer.
+// KnowledgeSearchRow 承载向量与关键词召回需要的来源数据和各路分数，
+// 供 Service 融合排序及生成引用使用，不向 HTTP 层暴露原始向量。
 type KnowledgeSearchRow struct {
 	KnowledgeBaseID string
 	DocumentID      string
@@ -28,11 +27,14 @@ type KnowledgeSearchRow struct {
 	SectionTitle    string
 	Metadata        model.JSONDocument
 	Similarity      float64
+	VectorRank      int
+	KeywordRank     int
+	KeywordScore    float64
+	FusionScore     float64
 }
 
-// KnowledgeRepository is the persistence boundary for user-owned knowledge.
-// Every read and mutation receives userID so callers cannot access records by
-// guessable UUID alone.
+// KnowledgeRepository 封装用户知识库的持久化边界。
+// 用户数据的读写必须携带 userID，不能仅凭记录 UUID 访问。
 type KnowledgeRepository interface {
 	CreateBase(ctx context.Context, userID string, base *model.KnowledgeBase) error
 	ListBasesByUser(ctx context.Context, userID string) ([]model.KnowledgeBase, error)
@@ -56,6 +58,7 @@ type KnowledgeRepository interface {
 	ListChunks(ctx context.Context, userID, documentID string) ([]model.KnowledgeChunk, error)
 	CountOwnedBases(ctx context.Context, userID string, baseIDs []string) (int64, error)
 	SearchChunksExact(ctx context.Context, userID string, baseIDs []string, providerName, embeddingModel string, dimension, limit int, query pgvector.Vector) ([]KnowledgeSearchRow, error)
+	SearchChunksKeyword(ctx context.Context, userID string, baseIDs []string, providerName, embeddingModel string, dimension, limit int, queryText string, query pgvector.Vector) ([]KnowledgeSearchRow, error)
 }
 
 type GormKnowledgeRepository struct{ db *gorm.DB }
@@ -211,6 +214,7 @@ func (r *GormKnowledgeRepository) AdvanceDocumentIngestion(ctx context.Context, 
 }
 
 func (r *GormKnowledgeRepository) CompleteDocumentIngestion(ctx context.Context, userID, documentID string, version int64, chunks []model.KnowledgeChunk, providerName, embeddingModel string, dimension int, indexedAt time.Time) error {
+	prepareKnowledgeKeywords(chunks)
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var document model.KnowledgeDocument
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Model(&model.KnowledgeDocument{}).
@@ -320,6 +324,7 @@ func (r *GormKnowledgeRepository) FailObjectCleanup(ctx context.Context, id, mes
 }
 
 func (r *GormKnowledgeRepository) ReplaceChunks(ctx context.Context, userID, documentID string, chunks []model.KnowledgeChunk) error {
+	prepareKnowledgeKeywords(chunks)
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var document model.KnowledgeDocument
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Model(&model.KnowledgeDocument{}).
@@ -366,9 +371,8 @@ func (r *GormKnowledgeRepository) CountOwnedBases(ctx context.Context, userID st
 	return count, err
 }
 
-// SearchChunksExact deliberately uses a sequential exact cosine-distance
-// ranking as the correctness baseline. An approximate HNSW index can be added
-// only after recall and latency measurements justify that trade-off.
+// SearchChunksExact 使用精确余弦距离排序建立基线。
+// 是否增加 HNSW 近似索引，需要依据后续召回率和延迟实验决定。
 func (r *GormKnowledgeRepository) SearchChunksExact(ctx context.Context, userID string, baseIDs []string, providerName, embeddingModel string, dimension, limit int, query pgvector.Vector) ([]KnowledgeSearchRow, error) {
 	if len(baseIDs) == 0 || limit <= 0 {
 		return []KnowledgeSearchRow{}, nil

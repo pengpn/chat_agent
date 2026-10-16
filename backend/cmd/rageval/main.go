@@ -16,6 +16,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/config"
 	"github.com/example/agent-platform/backend/internal/database"
 	"github.com/example/agent-platform/backend/internal/embeddinggateway"
+	"github.com/example/agent-platform/backend/internal/knowledgelex"
 	"github.com/example/agent-platform/backend/internal/rageval"
 	"github.com/example/agent-platform/backend/internal/repository"
 	"github.com/example/agent-platform/backend/internal/service"
@@ -205,6 +206,7 @@ func capture(args []string) error {
 		SimilarityThreshold: cfg.Knowledge.RetrievalSimilarityThreshold,
 		ContextTokenBudget:  cfg.Knowledge.RetrievalContextTokenBudget,
 		MaxKnowledgeBases:   cfg.Knowledge.RetrievalMaxKnowledgeBases, MaxQueryChars: cfg.Knowledge.RetrievalMaxQueryChars,
+		Mode: cfg.Knowledge.RetrievalMode, RRFK: cfg.Knowledge.RetrievalRRFK,
 	})
 	baseIDs := make(map[string]bool)
 	for _, item := range dataset.Cases {
@@ -255,7 +257,9 @@ func capture(args []string) error {
 			CandidateLimit: cfg.Knowledge.RetrievalCandidateLimit, TopK: cfg.Knowledge.RetrievalTopK,
 			SimilarityThreshold: cfg.Knowledge.RetrievalSimilarityThreshold,
 			ContextTokenBudget:  cfg.Knowledge.RetrievalContextTokenBudget,
-			RetrievalMode:       "exact_vector",
+			RetrievalMode:       cfg.Knowledge.RetrievalMode,
+			RRFK:                cfg.Knowledge.RetrievalRRFK,
+			KeywordVersion:      knowledgelex.Version,
 			EmbeddingTokenizer:  cfg.Embedding.Tokenizer,
 		},
 		Cases: make([]rageval.Observation, 0, len(dataset.Cases)),
@@ -275,13 +279,15 @@ func capture(args []string) error {
 		} else if snapshot.Parameters.EmbeddingProvider != trace.EmbeddingProvider || snapshot.Parameters.EmbeddingModel != trace.EmbeddingModel || snapshot.Parameters.EmbeddingDimension != trace.EmbeddingDimension {
 			return fmt.Errorf("case %q used a different embedding version", item.ID)
 		}
-		observed := rageval.Observation{CaseID: item.ID, Query: item.Query, EmbeddingMS: trace.EmbeddingMS, SearchMS: trace.SearchMS, TotalMS: trace.TotalMS, SelectedChunkIDs: trace.SelectedChunkIDs}
+		observed := rageval.Observation{CaseID: item.ID, Query: item.Query, EmbeddingMS: trace.EmbeddingMS, SearchMS: trace.SearchMS, KeywordSearchMS: trace.KeywordSearchMS, TotalMS: trace.TotalMS, SelectedChunkIDs: trace.SelectedChunkIDs}
 		for _, candidate := range trace.Candidates {
 			observed.Candidates = append(observed.Candidates, rageval.Candidate{
 				KnowledgeBaseID: candidate.KnowledgeBaseID, DocumentID: candidate.DocumentID,
 				DocumentName: candidate.DocumentName, ChunkID: candidate.ChunkID, ChunkIndex: candidate.ChunkIndex,
 				Content: candidate.Content, ContentHash: candidate.ContentHash,
 				TokenCount: candidate.TokenCount, Similarity: candidate.Similarity,
+				VectorRank: candidate.VectorRank, KeywordRank: candidate.KeywordRank,
+				KeywordScore: candidate.KeywordScore, FusionScore: candidate.FusionScore,
 			})
 		}
 		snapshot.Cases = append(snapshot.Cases, observed)

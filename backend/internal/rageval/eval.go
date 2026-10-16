@@ -10,6 +10,7 @@ import (
 	"math"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -53,6 +54,8 @@ type Parameters struct {
 	EmbeddingTokenizer  string  `json:"embeddingTokenizer"`
 	GenerationProvider  string  `json:"generationProvider,omitempty"`
 	GenerationModel     string  `json:"generationModel,omitempty"`
+	RRFK                int     `json:"rrfK,omitempty"`
+	KeywordVersion      int     `json:"keywordVersion,omitempty"`
 }
 
 // Snapshot 保存一次实验。抓取命令先写入检索数据；复核人员再补充回答、
@@ -78,6 +81,10 @@ type Candidate struct {
 	ContentHash     string  `json:"contentHash"`
 	TokenCount      int64   `json:"tokenCount"`
 	Similarity      float64 `json:"similarity"`
+	VectorRank      int     `json:"vectorRank,omitempty"`
+	KeywordRank     int     `json:"keywordRank,omitempty"`
+	KeywordScore    float64 `json:"keywordScore,omitempty"`
+	FusionScore     float64 `json:"fusionScore,omitempty"`
 }
 
 type Claim struct {
@@ -93,6 +100,7 @@ type Observation struct {
 	SelectedChunkIDs []string    `json:"selectedChunkIds,omitempty"`
 	EmbeddingMS      int64       `json:"embeddingMs"`
 	SearchMS         int64       `json:"searchMs"`
+	KeywordSearchMS  int64       `json:"keywordSearchMs"`
 	TotalMS          int64       `json:"totalMs"`
 	Answer           string      `json:"answer,omitempty"`
 	AnswerCorrect    *bool       `json:"answerCorrect,omitempty"`
@@ -117,32 +125,34 @@ type CaseResult struct {
 	Outcome             string   `json:"outcome"`
 	EmbeddingMS         int64    `json:"embeddingMs"`
 	SearchMS            int64    `json:"searchMs"`
+	KeywordSearchMS     int64    `json:"keywordSearchMs"`
 	GenerationMS        int64    `json:"generationMs,omitempty"`
 }
 
 type Summary struct {
-	Name               string       `json:"name"`
-	DatasetID          string       `json:"datasetId"`
-	CorpusFingerprint  string       `json:"corpusFingerprint"`
-	IndexFingerprint   string       `json:"indexFingerprint"`
-	Parameters         Parameters   `json:"parameters"`
-	CaseCount          int          `json:"caseCount"`
-	AnswerableCount    int          `json:"answerableCount"`
-	UnanswerableCount  int          `json:"unanswerableCount"`
-	NoEvidenceAccuracy *float64     `json:"noEvidenceAccuracy,omitempty"`
-	GenerationGraded   int          `json:"generationGraded"`
-	CandidateRecall    float64      `json:"candidateRecall"`
-	RecallAtK          float64      `json:"recallAtK"`
-	MRRAtK             float64      `json:"mrrAtK"`
-	NDCGAtK            float64      `json:"ndcgAtK"`
-	Faithfulness       *float64     `json:"faithfulness,omitempty"`
-	CitationPrecision  *float64     `json:"citationPrecision,omitempty"`
-	CitationRecall     *float64     `json:"citationRecall,omitempty"`
-	AnswerAccuracy     *float64     `json:"answerAccuracy,omitempty"`
-	MeanEmbeddingMS    float64      `json:"meanEmbeddingMs"`
-	MeanSearchMS       float64      `json:"meanSearchMs"`
-	MeanGenerationMS   *float64     `json:"meanGenerationMs,omitempty"`
-	Cases              []CaseResult `json:"cases"`
+	Name                string       `json:"name"`
+	DatasetID           string       `json:"datasetId"`
+	CorpusFingerprint   string       `json:"corpusFingerprint"`
+	IndexFingerprint    string       `json:"indexFingerprint"`
+	Parameters          Parameters   `json:"parameters"`
+	CaseCount           int          `json:"caseCount"`
+	AnswerableCount     int          `json:"answerableCount"`
+	UnanswerableCount   int          `json:"unanswerableCount"`
+	NoEvidenceAccuracy  *float64     `json:"noEvidenceAccuracy,omitempty"`
+	GenerationGraded    int          `json:"generationGraded"`
+	CandidateRecall     float64      `json:"candidateRecall"`
+	RecallAtK           float64      `json:"recallAtK"`
+	MRRAtK              float64      `json:"mrrAtK"`
+	NDCGAtK             float64      `json:"ndcgAtK"`
+	Faithfulness        *float64     `json:"faithfulness,omitempty"`
+	CitationPrecision   *float64     `json:"citationPrecision,omitempty"`
+	CitationRecall      *float64     `json:"citationRecall,omitempty"`
+	AnswerAccuracy      *float64     `json:"answerAccuracy,omitempty"`
+	MeanEmbeddingMS     float64      `json:"meanEmbeddingMs"`
+	MeanSearchMS        float64      `json:"meanSearchMs"`
+	MeanKeywordSearchMS float64      `json:"meanKeywordSearchMs"`
+	MeanGenerationMS    *float64     `json:"meanGenerationMs,omitempty"`
+	Cases               []CaseResult `json:"cases"`
 }
 
 func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
@@ -185,6 +195,7 @@ func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
 		}
 		summary.MeanEmbeddingMS += float64(result.EmbeddingMS)
 		summary.MeanSearchMS += float64(result.SearchMS)
+		summary.MeanKeywordSearchMS += float64(result.KeywordSearchMS)
 		if result.Faithfulness != nil {
 			summary.GenerationGraded++
 			faith += *result.Faithfulness
@@ -209,6 +220,7 @@ func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
 	}
 	summary.MeanEmbeddingMS /= n
 	summary.MeanSearchMS /= n
+	summary.MeanKeywordSearchMS /= n
 	if summary.GenerationGraded > 0 {
 		g := float64(summary.GenerationGraded)
 		summary.Faithfulness = ptr(faith / g)
@@ -249,7 +261,13 @@ func ValidateSnapshot(dataset Dataset, snapshot Snapshot) error {
 		return fmt.Errorf("snapshot header does not match dataset")
 	}
 	p := snapshot.Parameters
-	if p.CandidateLimit <= 0 || p.TopK <= 0 || p.TopK > p.CandidateLimit || p.ContextTokenBudget <= 0 || math.IsNaN(p.SimilarityThreshold) || math.IsInf(p.SimilarityThreshold, 0) || p.SimilarityThreshold < 0 || p.SimilarityThreshold > 1 || p.ChunkTargetTokens <= 0 || p.ChunkOverlapTokens < 0 || p.ChunkOverlapTokens >= p.ChunkTargetTokens || p.PromptVersion == "" || p.RetrievalMode == "" || p.EmbeddingProvider == "" || p.EmbeddingModel == "" || p.EmbeddingDimension <= 0 || p.EmbeddingTokenizer == "" {
+	if p.RetrievalMode != service.RetrievalModeVector && p.RetrievalMode != service.RetrievalModeHybrid {
+		return fmt.Errorf("snapshot %q has unsupported retrieval mode", snapshot.Name)
+	}
+	if p.RetrievalMode == service.RetrievalModeHybrid && (p.RRFK <= 0 || p.RRFK > 10000 || p.KeywordVersion <= 0) {
+		return fmt.Errorf("hybrid snapshot must record RRF constant and keyword version")
+	}
+	if p.CandidateLimit <= 0 || p.CandidateLimit > 200 || p.TopK <= 0 || p.TopK > p.CandidateLimit || p.ContextTokenBudget <= 0 || math.IsNaN(p.SimilarityThreshold) || math.IsInf(p.SimilarityThreshold, 0) || p.SimilarityThreshold < 0 || p.SimilarityThreshold > 1 || p.ChunkTargetTokens <= 0 || p.ChunkOverlapTokens < 0 || p.ChunkOverlapTokens >= p.ChunkTargetTokens || p.PromptVersion == "" || p.RetrievalMode == "" || p.EmbeddingProvider == "" || p.EmbeddingModel == "" || p.EmbeddingDimension <= 0 || p.EmbeddingTokenizer == "" {
 		return fmt.Errorf("snapshot %q has invalid experiment parameters", snapshot.Name)
 	}
 	if len(snapshot.Cases) != len(dataset.Cases) {
@@ -266,19 +284,51 @@ func ValidateSnapshot(dataset Dataset, snapshot Snapshot) error {
 	seen := make(map[string]bool, len(snapshot.Cases))
 	for _, item := range snapshot.Cases {
 		original, ok := gold[item.CaseID]
-		if !ok || seen[item.CaseID] || item.Query != original.Query || len(item.Candidates) > p.CandidateLimit {
+		maxCandidates := p.CandidateLimit
+		if p.RetrievalMode == service.RetrievalModeHybrid {
+			maxCandidates *= 2
+		}
+		if !ok || seen[item.CaseID] || item.Query != original.Query || len(item.Candidates) > maxCandidates {
 			return fmt.Errorf("snapshot %q has invalid case %q", snapshot.Name, item.CaseID)
 		}
 		seen[item.CaseID] = true
-		if item.EmbeddingMS < 0 || item.SearchMS < 0 || item.TotalMS < 0 || item.GenerationMS < 0 {
+		if item.EmbeddingMS < 0 || item.SearchMS < 0 || item.KeywordSearchMS < 0 || item.TotalMS < 0 || item.GenerationMS < 0 {
 			return fmt.Errorf("case %q has negative latency", item.CaseID)
 		}
 		chunkIDs := make(map[string]bool, len(item.Candidates))
+		vectorRanks, keywordRanks := make(map[int]bool), make(map[int]bool)
 		for _, candidate := range item.Candidates {
 			if candidate.ChunkID == "" || candidate.DocumentID == "" || candidate.KnowledgeBaseID == "" || chunkIDs[candidate.ChunkID] || math.IsNaN(candidate.Similarity) || math.IsInf(candidate.Similarity, 0) {
 				return fmt.Errorf("case %q has invalid candidate", item.CaseID)
 			}
 			chunkIDs[candidate.ChunkID] = true
+			if p.RetrievalMode == service.RetrievalModeHybrid {
+				if candidate.VectorRank < 0 || candidate.KeywordRank < 0 || candidate.VectorRank > p.CandidateLimit || candidate.KeywordRank > p.CandidateLimit || (candidate.VectorRank == 0 && candidate.KeywordRank == 0) || candidate.KeywordScore < 0 || math.IsNaN(candidate.KeywordScore) || math.IsInf(candidate.KeywordScore, 0) {
+					return fmt.Errorf("case %q has invalid hybrid candidate ranks", item.CaseID)
+				}
+				if candidate.VectorRank > 0 {
+					if vectorRanks[candidate.VectorRank] {
+						return fmt.Errorf("duplicate vector rank")
+					}
+					vectorRanks[candidate.VectorRank] = true
+				}
+				if candidate.KeywordRank > 0 {
+					if keywordRanks[candidate.KeywordRank] || candidate.KeywordScore <= 0 {
+						return fmt.Errorf("invalid keyword rank or score")
+					}
+					keywordRanks[candidate.KeywordRank] = true
+				}
+			}
+		}
+		for i := 1; i <= len(vectorRanks); i++ {
+			if !vectorRanks[i] {
+				return fmt.Errorf("vector ranks must be contiguous")
+			}
+		}
+		for i := 1; i <= len(keywordRanks); i++ {
+			if !keywordRanks[i] {
+				return fmt.Errorf("keyword ranks must be contiguous")
+			}
 		}
 		selected := replayCandidates(item.Candidates, estimator, p)
 		if item.SelectedChunkIDs != nil {
@@ -338,7 +388,7 @@ func evaluateCase(gold Case, observed Observation, p Parameters, estimator embed
 		candidateDocs[item.DocumentID] = true
 	}
 	selected := replayCandidates(observed.Candidates, estimator, p)
-	result := CaseResult{CaseID: gold.ID, CandidateChunkIDs: allChunkIDs, EmbeddingMS: observed.EmbeddingMS, SearchMS: observed.SearchMS, GenerationMS: observed.GenerationMS}
+	result := CaseResult{CaseID: gold.ID, CandidateChunkIDs: allChunkIDs, EmbeddingMS: observed.EmbeddingMS, SearchMS: observed.SearchMS, KeywordSearchMS: observed.KeywordSearchMS, GenerationMS: observed.GenerationMS}
 	selectedDocs := make(map[string]bool)
 	for _, match := range selected.Matches {
 		result.SelectedChunkIDs = append(result.SelectedChunkIDs, match.ChunkID)
@@ -405,10 +455,26 @@ func replayCandidates(candidates []Candidate, estimator embeddinggateway.TokenEs
 			KnowledgeBaseID: item.KnowledgeBaseID, DocumentID: item.DocumentID, DocumentName: item.DocumentName,
 			ChunkID: item.ChunkID, ChunkIndex: item.ChunkIndex, Content: item.Content,
 			ContentHash: item.ContentHash, TokenCount: item.TokenCount, Similarity: item.Similarity,
+			VectorRank: item.VectorRank, KeywordRank: item.KeywordRank, KeywordScore: item.KeywordScore, FusionScore: item.FusionScore,
 		})
+	}
+	if p.RetrievalMode == service.RetrievalModeHybrid {
+		var vector, keyword []repository.KnowledgeSearchRow
+		for _, row := range rows {
+			if row.VectorRank > 0 {
+				vector = append(vector, row)
+			}
+			if row.KeywordRank > 0 {
+				keyword = append(keyword, row)
+			}
+		}
+		sort.Slice(vector, func(i, j int) bool { return vector[i].VectorRank < vector[j].VectorRank })
+		sort.Slice(keyword, func(i, j int) bool { return keyword[i].KeywordRank < keyword[j].KeywordRank })
+		rows = service.FuseKnowledgeCandidates(vector, keyword, p.RRFK)
 	}
 	selected, _ := service.SelectKnowledgeCandidates(rows, estimator, service.KnowledgeRetrievalConfig{
 		TopK: p.TopK, SimilarityThreshold: p.SimilarityThreshold, ContextTokenBudget: p.ContextTokenBudget,
+		Mode: p.RetrievalMode, RRFK: p.RRFK,
 	})
 	return selected
 }

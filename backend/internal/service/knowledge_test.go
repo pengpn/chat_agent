@@ -46,13 +46,15 @@ func (f *fakeEmbeddingGateway) EmbedQuery(context.Context, embeddinggateway.Requ
 }
 
 type fakeKnowledgeRepository struct {
-	mu         sync.Mutex
-	base       model.KnowledgeBase
-	documents  map[string]model.KnowledgeDocument
-	chunks     map[string][]model.KnowledgeChunk
-	cleanups   []model.KnowledgeObjectCleanup
-	searchRows []repository.KnowledgeSearchRow
-	lastSearch struct {
+	mu           sync.Mutex
+	base         model.KnowledgeBase
+	documents    map[string]model.KnowledgeDocument
+	chunks       map[string][]model.KnowledgeChunk
+	cleanups     []model.KnowledgeObjectCleanup
+	searchRows   []repository.KnowledgeSearchRow
+	keywordRows  []repository.KnowledgeSearchRow
+	keywordCalls int
+	lastSearch   struct {
 		provider  string
 		model     string
 		dimension int
@@ -246,6 +248,20 @@ func (r *fakeKnowledgeRepository) SearchChunksExact(_ context.Context, userID st
 		end = limit
 	}
 	return append([]repository.KnowledgeSearchRow(nil), r.searchRows[:end]...), nil
+}
+
+func (r *fakeKnowledgeRepository) SearchChunksKeyword(_ context.Context, userID string, baseIDs []string, _ string, _ string, _ int, limit int, _ string, _ pgvector.Vector) ([]repository.KnowledgeSearchRow, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.keywordCalls++
+	if userID != r.base.UserID || len(baseIDs) != 1 || baseIDs[0] != r.base.ID {
+		return []repository.KnowledgeSearchRow{}, nil
+	}
+	end := len(r.keywordRows)
+	if end > limit {
+		end = limit
+	}
+	return append([]repository.KnowledgeSearchRow(nil), r.keywordRows[:end]...), nil
 }
 
 func TestKnowledgeUploadIsIdempotentAndPersistsReadyChunks(t *testing.T) {

@@ -197,6 +197,9 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 	if err := ensureKnowledgeForeignKeys(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateKnowledgeKeywordIndex(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateMessageTree(ctx, db); err != nil {
 		return err
 	}

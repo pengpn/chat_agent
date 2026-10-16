@@ -10,6 +10,7 @@ import (
 
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
+	"github.com/example/agent-platform/backend/internal/knowledgelex"
 	pgvector "github.com/pgvector/pgvector-go"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -91,6 +92,33 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	if err != nil || len(foreign) != 0 {
 		t.Fatalf("cross-user ListChunks() = %#v, error = %v", foreign, err)
 	}
+	keywordQuery := pgvector.NewVector([]float32{0, 1, 0})
+	keywordRows, err := repositories.Knowledge.SearchChunksKeyword(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 3, 10, "退款", keywordQuery)
+	if err != nil || len(keywordRows) != 1 || keywordRows[0].ChunkIndex != 0 || keywordRows[0].KeywordScore <= 0 {
+		t.Fatalf("中文关键词独立召回失败: %+v, %v", keywordRows, err)
+	}
+	foreignKeyword, err := repositories.Knowledge.SearchChunksKeyword(ctx, other.ID, []string{base.ID}, "test", "test-embedding", 3, 10, "退款", keywordQuery)
+	if err != nil || len(foreignKeyword) != 0 {
+		t.Fatalf("关键词查询越权: %+v, %v", foreignKeyword, err)
+	}
+	wrongModelKeyword, err := repositories.Knowledge.SearchChunksKeyword(ctx, owner.ID, []string{base.ID}, "test", "other-model", 3, 10, "退款", keywordQuery)
+	if err != nil || len(wrongModelKeyword) != 0 {
+		t.Fatalf("关键词查询未过滤模型版本: %+v, %v", wrongModelKeyword, err)
+	}
+	if err := db.Model(&model.KnowledgeChunk{}).Where("id = ?", stored[0].ID).
+		UpdateColumns(map[string]any{"keyword_text": "", "keyword_version": 0}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateKnowledgeKeywordIndex(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var backfilled model.KnowledgeChunk
+	if err := db.First(&backfilled, "id = ?", stored[0].ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if backfilled.KeywordVersion != knowledgelex.Version || backfilled.KeywordText == "" {
+		t.Fatal("旧片段关键词回填失败")
+	}
 	equalQuery := pgvector.NewVector([]float32{1, 1, 0})
 	equalRows, err := repositories.Knowledge.SearchChunksExact(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 3, 10, equalQuery)
 	if err != nil {
@@ -118,6 +146,10 @@ func TestPostgresKnowledgeOwnershipVectorAndCitationSnapshot(t *testing.T) {
 	notReadyRows, err := repositories.Knowledge.SearchChunksExact(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 3, 10, equalQuery)
 	if err != nil || len(notReadyRows) != 0 {
 		t.Fatalf("not-ready document leaked into search: %+v, error = %v", notReadyRows, err)
+	}
+	notReadyKeyword, err := repositories.Knowledge.SearchChunksKeyword(ctx, owner.ID, []string{base.ID}, "test", "test-embedding", 3, 10, "退款", keywordQuery)
+	if err != nil || len(notReadyKeyword) != 0 {
+		t.Fatalf("未就绪文档进入关键词结果: %+v, %v", notReadyKeyword, err)
 	}
 	if err := db.WithContext(ctx).Model(&model.KnowledgeDocument{}).Where("id = ?", document.ID).Update("status", model.KnowledgeDocumentStatusReady).Error; err != nil {
 		t.Fatal(err)

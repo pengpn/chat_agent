@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "demo-rag-v1",
+  "corpusVersion": "synthetic-policy-v1",
+  "corpusFingerprint": "synthetic-same-sources-v1",
+  "indexFingerprint": "synthetic-same-index-v1",
+  "name": "demo-hybrid-rrf-top2",
+  "parameters": {
+    "chunkTargetTokens": 500,
+    "chunkOverlapTokens": 80,
+    "candidateLimit": 4,
+    "topK": 2,
+    "similarityThreshold": 0.5,
+    "contextTokenBudget": 1000,
+    "promptVersion": "rag-grounding-v2",
+    "retrievalMode": "hybrid_rrf",
+    "rrfK": 60,
+    "keywordVersion": 1,
+    "embeddingProvider": "synthetic",
+    "embeddingModel": "recorded-vector-demo",
+    "embeddingDimension": 3,
+    "embeddingTokenizer": "heuristic"
+  },
+  "cases": [
+    {"caseId":"refund","query":"退款需要多久内申请？","candidates":[
+      {"knowledgeBaseId":"demo-base","documentId":"doc-refund","documentName":"退款政策","chunkId":"refund-1","chunkIndex":0,"content":"收到商品后七天内可申请退款。","tokenCount":15,"similarity":0.87,"vectorRank":2,"keywordRank":1,"keywordScore":0.04},
+      {"knowledgeBaseId":"demo-base","documentId":"doc-faq","documentName":"常见问题","chunkId":"faq-1","chunkIndex":0,"content":"七日内可提交售后申请。","tokenCount":13,"similarity":0.60,"vectorRank":3,"keywordRank":2,"keywordScore":0.02},
+      {"knowledgeBaseId":"demo-base","documentId":"doc-shipping","documentName":"配送政策","chunkId":"shipping-1","chunkIndex":0,"content":"商品质量问题由商家承担退货运费。","tokenCount":18,"similarity":0.92,"vectorRank":1}
+    ],"embeddingMs":12,"searchMs":5,"keywordSearchMs":2},
+    {"caseId":"invoice","query":"如何申请电子发票？","candidates":[
+      {"knowledgeBaseId":"demo-base","documentId":"doc-invoice","documentName":"开票说明","chunkId":"invoice-1","chunkIndex":0,"content":"在订单详情页提交开票信息。","tokenCount":14,"similarity":0.10,"keywordRank":1,"keywordScore":0.03},
+      {"knowledgeBaseId":"demo-base","documentId":"doc-refund","documentName":"退款政策","chunkId":"refund-1","chunkIndex":0,"content":"收到商品后七天内可申请退款。","tokenCount":15,"similarity":0.62,"vectorRank":1}
+    ],"embeddingMs":12,"searchMs":4,"keywordSearchMs":2},
+    {"caseId":"shipping","query":"退货运费由谁承担？","candidates":[
+      {"knowledgeBaseId":"demo-base","documentId":"doc-shipping","documentName":"配送政策","chunkId":"shipping-1","chunkIndex":0,"content":"商品质量问题由商家承担退货运费。","tokenCount":18,"similarity":0.82,"vectorRank":1,"keywordRank":1,"keywordScore":0.03}
+    ],"embeddingMs":11,"searchMs":4,"keywordSearchMs":2},
+    {"caseId":"unknown","query":"会员积分可以兑换机票吗？","candidates":[
+      {"knowledgeBaseId":"demo-base","documentId":"doc-faq","documentName":"常见问题","chunkId":"faq-1","chunkIndex":0,"content":"七日内可提交售后申请。","tokenCount":13,"similarity":0.11,"vectorRank":1}
+    ],"embeddingMs":10,"searchMs":4,"keywordSearchMs":2}
+  ]
+}

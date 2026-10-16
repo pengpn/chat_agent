@@ -81,6 +81,8 @@ type KnowledgeConfig struct {
 	RetrievalMaxKnowledgeBases   int
 	RetrievalMaxQueryChars       int
 	RetrievalTraceEnabled        bool
+	RetrievalMode                string
+	RetrievalRRFK                int
 }
 
 type Config struct {
@@ -667,6 +669,17 @@ func loadKnowledgeConfig() (KnowledgeConfig, error) {
 	if err != nil {
 		return KnowledgeConfig{}, err
 	}
+	mode := strings.TrimSpace(env("RAG_RETRIEVAL_MODE", "exact_vector"))
+	if mode != "exact_vector" && mode != "hybrid_rrf" {
+		return KnowledgeConfig{}, fmt.Errorf("RAG_RETRIEVAL_MODE must be exact_vector or hybrid_rrf")
+	}
+	rrfK, err := positiveIntEnv("RAG_RETRIEVAL_RRF_K", 60)
+	if err != nil {
+		return KnowledgeConfig{}, err
+	}
+	if rrfK > 10000 {
+		return KnowledgeConfig{}, fmt.Errorf("RAG_RETRIEVAL_RRF_K must not exceed 10000")
+	}
 	return KnowledgeConfig{
 		DocumentMaxBytes: maxBytes, MaxTextChars: maxTextChars,
 		ChunkTargetTokens: target, ChunkOverlap: overlap, ChunkMinTokens: minimum,
@@ -675,6 +688,7 @@ func loadKnowledgeConfig() (KnowledgeConfig, error) {
 		RetrievalSimilarityThreshold: similarityThreshold, RetrievalContextTokenBudget: contextTokenBudget,
 		RetrievalMaxKnowledgeBases: maxKnowledgeBases, RetrievalMaxQueryChars: maxQueryChars,
 		RetrievalTraceEnabled: traceEnabled,
+		RetrievalMode:         mode, RetrievalRRFK: rrfK,
 	}, nil
 }
 
