@@ -25,24 +25,22 @@ type ProviderConfig struct {
 	ConnectTimeout     time.Duration           `json:"-"`
 }
 
-// ModelLimits are deployment safety limits. ContextWindow includes input and
-// output tokens; MaxOutputTokens is the maximum output reservation for a call.
+// ModelLimits 定义部署时的安全限制。ContextWindow 包含输入和输出 Token，
+// MaxOutputTokens 表示单次调用允许预留的最大输出 Token 数。
 type ModelLimits struct {
 	ContextWindow   int64
 	MaxOutputTokens int64
 }
 
-// ModelPricing uses USD per one million tokens. It intentionally lives in
-// configuration because providers report usage while deployment owners define
-// the prices they are billed.
+// ModelPricing 以每百万 Token 的美元价格计价。
+// 供应商报告实际用量，部署方在配置中维护适用的计费价格。
 type ModelPricing struct {
 	InputUSDPerMillionTokens  float64
 	OutputUSDPerMillionTokens float64
 }
 
-// EmbeddingConfig describes one active OpenAI-compatible embedding deployment.
-// It is intentionally independent from chat providers because embedding models
-// have different endpoints, dimensions, batching limits and pricing.
+// EmbeddingConfig 描述当前启用的兼容 OpenAI 协议的 Embedding 部署。
+// Embedding 模型的端点、维度、批量限制和计费方式独立于对话模型配置。
 type EmbeddingConfig struct {
 	Enabled                  bool
 	Provider                 string
@@ -64,8 +62,8 @@ type EmbeddingConfig struct {
 	InputUSDPerMillionTokens *float64
 }
 
-// KnowledgeConfig controls document ingestion and retrieval independently from
-// one-off chat attachments. Token values are measured by the embedding tokenizer.
+// KnowledgeConfig 控制知识文档摄取与检索，独立于单次对话附件的配置。
+// 其中的 Token 数量由 Embedding 分词器估算。
 type KnowledgeConfig struct {
 	DocumentMaxBytes             int64
 	MaxTextChars                 int
@@ -177,12 +175,12 @@ type Config struct {
 	AlertCostThresholdNanoUSD   int64
 	Embedding                   EmbeddingConfig
 	Knowledge                   KnowledgeConfig
+	Rerank                      RerankConfig
 	Providers                   []ProviderConfig
 }
 
 func Load() (Config, error) {
-	// Support the root .env file for local development while keeping real
-	// environment variables authoritative in containers and production.
+	// 本地开发支持读取根目录的 .env；容器或生产环境中已设置的环境变量优先。
 	for _, path := range []string{".env", "../.env"} {
 		if err := loadDotEnv(path); err != nil {
 			return Config{}, err
@@ -406,6 +404,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	rerank, err := loadRerankConfig()
+	if err != nil {
+		return Config{}, err
+	}
 	quotaEnabled, err := boolEnv("QUOTA_ENABLED", true)
 	if err != nil {
 		return Config{}, err
@@ -563,6 +565,7 @@ func Load() (Config, error) {
 		AlertCostThresholdNanoUSD:   alertCostThresholdNanoUSD,
 		Embedding:                   embedding,
 		Knowledge:                   knowledge,
+		Rerank:                      rerank,
 		Providers:                   providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
@@ -905,9 +908,9 @@ func configuredProviders(connectTimeout time.Duration, defaultContextWindow, def
 	return result, nil
 }
 
-// parseModelTokenizers accepts comma-separated model:tokenizer entries. The
-// supported local tokenizer names include tiktoken encodings and the bundled
-// DeepSeek V4 official tokenizer; heuristic keeps the conservative fallback.
+// parseModelTokenizers 解析逗号分隔的 model:tokenizer 配置。
+// 支持 tiktoken 编码和项目内置的 DeepSeek V4 官方分词器，
+// heuristic 表示使用保守的启发式估算作为回退。
 func parseModelTokenizers(value string, models []string, defaults map[string]string) (map[string]string, error) {
 	allowed := map[string]bool{"heuristic": true, "o200k_base": true, "cl100k_base": true, "p50k_base": true, "r50k_base": true, "deepseek_v4": true}
 	result := make(map[string]string, len(models))
@@ -957,9 +960,8 @@ func defaultOpenAITokenizer(model string) string {
 	return "heuristic"
 }
 
-// parseModelLimits accepts comma-separated model:context_window:max_output
-// entries. Enabled models without an explicit entry receive the deployment
-// defaults so every model has a deterministic budget.
+// parseModelLimits 解析逗号分隔的 model:context_window:max_output 配置。
+// 未单独配置的已启用模型使用部署默认值，确保每个模型都有明确的预算。
 func parseModelLimits(value string, models []string, defaults ModelLimits) (map[string]ModelLimits, error) {
 	if defaults.ContextWindow <= 0 || defaults.MaxOutputTokens <= 0 || defaults.MaxOutputTokens >= defaults.ContextWindow {
 		return nil, fmt.Errorf("default model limits are invalid")
@@ -1067,8 +1069,8 @@ func positiveDurationEnv(key, fallback string) (time.Duration, error) {
 }
 
 func validateThinkingBudgetTokens(value int) error {
-	// Anthropic requires at least 1024 thinking tokens and the current adapter
-	// uses max_tokens=4096, so keep the budget inside that supported range.
+	// Anthropic 的思考预算至少为 1024 Token，当前适配器使用 max_tokens=4096，
+	// 因此将思考预算限制在此范围内，并为正文输出留出空间。
 	if value < 1024 || value >= 4096 {
 		return fmt.Errorf("THINKING_BUDGET_TOKENS must be between 1024 and 4095")
 	}
@@ -1084,8 +1086,8 @@ func boolEnv(key string, fallback bool) (bool, error) {
 	return parsed, nil
 }
 
-// parseModelPricing accepts comma-separated entries in the form
-// model:input_usd_per_million:output_usd_per_million.
+// parseModelPricing 解析逗号分隔的价格配置，格式为
+// model:input_usd_per_million:output_usd_per_million。
 func parseModelPricing(value string) (map[string]ModelPricing, error) {
 	pricing := make(map[string]ModelPricing)
 	if strings.TrimSpace(value) == "" {

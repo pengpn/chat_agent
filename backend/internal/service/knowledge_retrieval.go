@@ -12,6 +12,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/knowledgelex"
 	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/repository"
+	"github.com/example/agent-platform/backend/internal/rerankgateway"
 	"github.com/google/uuid"
 	pgvector "github.com/pgvector/pgvector-go"
 )
@@ -26,50 +27,61 @@ type KnowledgeRetrievalConfig struct {
 	TraceEnabled        bool
 	Mode                string
 	RRFK                int
+	RerankEnabled       bool
 }
 
 // KnowledgeRetrievalTrace 是检索诊断快照，可能包含用户文档原文。
 // 调用方只能将其保存在有访问控制的位置。
 type KnowledgeRetrievalTrace struct {
-	Query                 string                    `json:"query"`
-	KnowledgeBaseIDs      []string                  `json:"knowledgeBaseIds"`
-	Candidates            []KnowledgeCandidateTrace `json:"candidates"`
-	SelectedChunkIDs      []string                  `json:"selectedChunkIds"`
-	EmbeddingProvider     string                    `json:"embeddingProvider"`
-	EmbeddingModel        string                    `json:"embeddingModel"`
-	EmbeddingDimension    int                       `json:"embeddingDimension"`
-	PromptVersion         string                    `json:"promptVersion"`
-	CandidateLimit        int                       `json:"candidateLimit"`
-	TopK                  int                       `json:"topK"`
-	Threshold             float64                   `json:"threshold"`
-	ContextTokenBudget    int64                     `json:"contextTokenBudget"`
-	EmbeddingMS           int64                     `json:"embeddingMs"`
-	SearchMS              int64                     `json:"searchMs"`
-	TotalMS               int64                     `json:"totalMs"`
-	RetrievalMode         string                    `json:"retrievalMode"`
-	RRFK                  int                       `json:"rrfK,omitempty"`
-	VectorCandidateCount  int                       `json:"vectorCandidateCount"`
-	KeywordCandidateCount int                       `json:"keywordCandidateCount"`
-	KeywordTerms          []string                  `json:"keywordTerms,omitempty"`
-	KeywordSearchMS       int64                     `json:"keywordSearchMs"`
+	Query                   string                    `json:"query"`
+	KnowledgeBaseIDs        []string                  `json:"knowledgeBaseIds"`
+	Candidates              []KnowledgeCandidateTrace `json:"candidates"`
+	SelectedChunkIDs        []string                  `json:"selectedChunkIds"`
+	EmbeddingProvider       string                    `json:"embeddingProvider"`
+	EmbeddingModel          string                    `json:"embeddingModel"`
+	EmbeddingDimension      int                       `json:"embeddingDimension"`
+	PromptVersion           string                    `json:"promptVersion"`
+	CandidateLimit          int                       `json:"candidateLimit"`
+	TopK                    int                       `json:"topK"`
+	Threshold               float64                   `json:"threshold"`
+	ContextTokenBudget      int64                     `json:"contextTokenBudget"`
+	EmbeddingMS             int64                     `json:"embeddingMs"`
+	SearchMS                int64                     `json:"searchMs"`
+	TotalMS                 int64                     `json:"totalMs"`
+	RetrievalMode           string                    `json:"retrievalMode"`
+	RRFK                    int                       `json:"rrfK,omitempty"`
+	VectorCandidateCount    int                       `json:"vectorCandidateCount"`
+	KeywordCandidateCount   int                       `json:"keywordCandidateCount"`
+	KeywordTerms            []string                  `json:"keywordTerms,omitempty"`
+	KeywordSearchMS         int64                     `json:"keywordSearchMs"`
+	RerankEnabled           bool                      `json:"rerankEnabled,omitempty"`
+	RerankProvider          string                    `json:"rerankProvider,omitempty"`
+	RerankModel             string                    `json:"rerankModel,omitempty"`
+	RerankMS                int64                     `json:"rerankMs"`
+	RerankEstimatedTokens   int64                     `json:"rerankEstimatedTokens,omitempty"`
+	RerankInputTokens       *int64                    `json:"rerankInputTokens,omitempty"`
+	RerankBilledSearchUnits *float64                  `json:"rerankBilledSearchUnits,omitempty"`
 }
 
 type KnowledgeCandidateTrace struct {
-	Rank            int     `json:"rank"`
-	KnowledgeBaseID string  `json:"knowledgeBaseId"`
-	DocumentID      string  `json:"documentId"`
-	DocumentName    string  `json:"documentName"`
-	ChunkID         string  `json:"chunkId"`
-	ChunkIndex      int     `json:"chunkIndex"`
-	Content         string  `json:"content"`
-	ContentHash     string  `json:"contentHash"`
-	TokenCount      int64   `json:"tokenCount"`
-	Similarity      float64 `json:"similarity"`
-	Decision        string  `json:"decision"`
-	VectorRank      int     `json:"vectorRank,omitempty"`
-	KeywordRank     int     `json:"keywordRank,omitempty"`
-	KeywordScore    float64 `json:"keywordScore,omitempty"`
-	FusionScore     float64 `json:"fusionScore,omitempty"`
+	Rank            int      `json:"rank"`
+	KnowledgeBaseID string   `json:"knowledgeBaseId"`
+	DocumentID      string   `json:"documentId"`
+	DocumentName    string   `json:"documentName"`
+	ChunkID         string   `json:"chunkId"`
+	ChunkIndex      int      `json:"chunkIndex"`
+	Content         string   `json:"content"`
+	ContentHash     string   `json:"contentHash"`
+	TokenCount      int64    `json:"tokenCount"`
+	Similarity      float64  `json:"similarity"`
+	Decision        string   `json:"decision"`
+	VectorRank      int      `json:"vectorRank,omitempty"`
+	KeywordRank     int      `json:"keywordRank,omitempty"`
+	KeywordScore    float64  `json:"keywordScore,omitempty"`
+	FusionScore     float64  `json:"fusionScore,omitempty"`
+	PreRerankRank   int      `json:"preRerankRank,omitempty"`
+	RerankRank      int      `json:"rerankRank,omitempty"`
+	RerankScore     *float64 `json:"rerankScore,omitempty"`
 }
 
 type KnowledgeRetrievalRequest struct {
@@ -96,6 +108,9 @@ type KnowledgeRetrievalMatch struct {
 	KeywordRank     int            `json:"keywordRank,omitempty"`
 	KeywordScore    float64        `json:"keywordScore,omitempty"`
 	FusionScore     float64        `json:"fusionScore,omitempty"`
+	PreRerankRank   int            `json:"preRerankRank,omitempty"`
+	RerankRank      int            `json:"rerankRank,omitempty"`
+	RerankScore     *float64       `json:"rerankScore,omitempty"`
 }
 
 type KnowledgeRetrievalResult struct {
@@ -116,6 +131,7 @@ type KnowledgeRetrievalService struct {
 	embeddings embeddinggateway.Gateway
 	estimator  chunkTokenEstimator
 	config     KnowledgeRetrievalConfig
+	reranker   rerankgateway.Gateway
 }
 
 func NewKnowledgeRetrieval(repository repository.KnowledgeRepository, embeddings embeddinggateway.Gateway, estimator chunkTokenEstimator, cfg KnowledgeRetrievalConfig) *KnowledgeRetrievalService {
@@ -223,6 +239,27 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 		keywordSearchMS = time.Since(keywordStarted).Milliseconds()
 		candidates = FuseKnowledgeCandidates(candidates, keyword, s.config.RRFK)
 	}
+	var reranked rerankgateway.Result
+	rerankMS := int64(0)
+	if s.config.RerankEnabled && len(candidates) > 0 {
+		if s.reranker == nil {
+			return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, rerankgateway.ErrNotConfigured
+		}
+		rerankStarted := time.Now()
+		documents := make([]string, len(candidates))
+		for i, candidate := range candidates {
+			documents[i] = candidate.Content
+		}
+		reranked, err = s.reranker.Rerank(ctx, rerankgateway.Request{UserID: userID, Query: query, Documents: documents})
+		if err != nil {
+			return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, fmt.Errorf("%w: rerank: %w", ErrKnowledgeRetrievalFailed, err)
+		}
+		candidates, err = ApplyKnowledgeRerank(candidates, reranked.Items)
+		if err != nil {
+			return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, fmt.Errorf("%w: rerank: %w", ErrKnowledgeRetrievalFailed, err)
+		}
+		rerankMS = time.Since(rerankStarted).Milliseconds()
+	}
 	result, decisions := SelectKnowledgeCandidates(candidates, s.estimator, s.config)
 	result.EmbeddingProvider, result.EmbeddingModel, result.EmbeddingDimension = embedded.Provider, embedded.Model, embedded.Dimension
 	result.RetrievalMode = s.config.Mode
@@ -237,6 +274,9 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 			RetrievalMode: s.config.Mode, RRFK: s.config.RRFK,
 			VectorCandidateCount: vectorCandidateCount, KeywordCandidateCount: keywordCandidateCount,
 			KeywordSearchMS: keywordSearchMS,
+			RerankEnabled:   s.config.RerankEnabled, RerankProvider: reranked.Provider, RerankModel: reranked.Model,
+			RerankMS: rerankMS, RerankEstimatedTokens: reranked.EstimatedTokens,
+			RerankInputTokens: reranked.InputTokens, RerankBilledSearchUnits: reranked.BilledSearchUnits,
 		}
 		if s.config.Mode == RetrievalModeHybrid {
 			trace.KeywordTerms = knowledgelex.QueryTerms(query)
@@ -254,6 +294,8 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 		logger.Int("candidate_count", len(candidates)), logger.Int("result_count", len(result.Matches)),
 		logger.String("retrieval_mode", s.config.Mode), logger.Int("vector_candidate_count", vectorCandidateCount),
 		logger.Int("keyword_candidate_count", keywordCandidateCount), logger.Int64("keyword_search_ms", keywordSearchMS),
+		logger.Bool("rerank_enabled", s.config.RerankEnabled), logger.String("rerank_provider", reranked.Provider),
+		logger.String("rerank_model", reranked.Model), logger.Int64("rerank_ms", rerankMS),
 		logger.Int64("context_tokens", result.UsedContextTokens), logger.Int64("context_token_budget", s.config.ContextTokenBudget),
 		logger.String("embedding_provider", embedded.Provider), logger.String("embedding_model", embedded.Model),
 		logger.Int("embedding_dimension", embedded.Dimension), logger.Int64("duration_ms", time.Since(started).Milliseconds()))
@@ -261,7 +303,7 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 }
 
 // SelectKnowledgeCandidates 由线上检索和离线重放共用。
-// 传入的候选片段必须已按余弦相似度或 RRF 融合结果排好序。
+// 传入的候选片段必须已按余弦相似度、RRF 或重排模型分数排好序。
 func SelectKnowledgeCandidates(candidates []repository.KnowledgeSearchRow, estimator embeddinggateway.TokenEstimator, cfg KnowledgeRetrievalConfig) (KnowledgeRetrievalResult, []KnowledgeCandidateTrace) {
 	if estimator == nil {
 		estimator = embeddinggateway.HeuristicTokenEstimator{}
@@ -276,6 +318,7 @@ func SelectKnowledgeCandidates(candidates []repository.KnowledgeSearchRow, estim
 			Similarity: candidate.Similarity,
 			VectorRank: candidate.VectorRank, KeywordRank: candidate.KeywordRank,
 			KeywordScore: candidate.KeywordScore, FusionScore: candidate.FusionScore,
+			PreRerankRank: candidate.PreRerankRank, RerankRank: candidate.RerankRank, RerankScore: knowledgeRerankScore(candidate),
 		}
 		switch {
 		case len(result.Matches) >= cfg.TopK:
@@ -312,6 +355,7 @@ func SelectKnowledgeCandidates(candidates []repository.KnowledgeSearchRow, estim
 				Metadata: metadata, Similarity: candidate.Similarity,
 				VectorRank: candidate.VectorRank, KeywordRank: candidate.KeywordRank,
 				KeywordScore: candidate.KeywordScore, FusionScore: candidate.FusionScore,
+				PreRerankRank: candidate.PreRerankRank, RerankRank: candidate.RerankRank, RerankScore: knowledgeRerankScore(candidate),
 			})
 			decision.Decision = "selected"
 		}

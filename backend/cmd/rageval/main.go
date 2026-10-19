@@ -19,6 +19,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/knowledgelex"
 	"github.com/example/agent-platform/backend/internal/rageval"
 	"github.com/example/agent-platform/backend/internal/repository"
+	"github.com/example/agent-platform/backend/internal/rerankgateway"
 	"github.com/example/agent-platform/backend/internal/service"
 	"github.com/google/uuid"
 )
@@ -197,6 +198,10 @@ func capture(args []string) error {
 	if err != nil {
 		return err
 	}
+	reranker, err := rerankgateway.NewConfigured(cfg.Rerank)
+	if err != nil {
+		return err
+	}
 	estimator, err := embeddinggateway.NewTokenEstimator(cfg.Embedding.Tokenizer)
 	if err != nil {
 		return err
@@ -207,7 +212,9 @@ func capture(args []string) error {
 		ContextTokenBudget:  cfg.Knowledge.RetrievalContextTokenBudget,
 		MaxKnowledgeBases:   cfg.Knowledge.RetrievalMaxKnowledgeBases, MaxQueryChars: cfg.Knowledge.RetrievalMaxQueryChars,
 		Mode: cfg.Knowledge.RetrievalMode, RRFK: cfg.Knowledge.RetrievalRRFK,
+		RerankEnabled: cfg.Rerank.Enabled,
 	})
+	retrieval.ConfigureReranker(reranker)
 	baseIDs := make(map[string]bool)
 	for _, item := range dataset.Cases {
 		if len(item.KnowledgeBaseIDs) == 0 {
@@ -264,6 +271,13 @@ func capture(args []string) error {
 		},
 		Cases: make([]rageval.Observation, 0, len(dataset.Cases)),
 	}
+	if cfg.Rerank.Enabled {
+		snapshot.Parameters.RerankEnabled = true
+		snapshot.Parameters.RerankProvider, snapshot.Parameters.RerankModel = cfg.Rerank.Provider, cfg.Rerank.Model
+		snapshot.Parameters.RerankTokenizer = cfg.Rerank.Tokenizer
+		snapshot.Parameters.RerankMaxDocuments, snapshot.Parameters.RerankMaxPairTokens, snapshot.Parameters.RerankMaxTotalTokens = cfg.Rerank.MaxDocuments, cfg.Rerank.MaxPairTokens, cfg.Rerank.MaxTotalTokens
+	}
+	observedRerankModel := ""
 	for _, item := range dataset.Cases {
 		_, trace, err := retrieval.SearchWithTrace(ctx, *userID, service.KnowledgeRetrievalRequest{
 			Query: item.Query, KnowledgeBaseIDs: item.KnowledgeBaseIDs,
@@ -279,7 +293,15 @@ func capture(args []string) error {
 		} else if snapshot.Parameters.EmbeddingProvider != trace.EmbeddingProvider || snapshot.Parameters.EmbeddingModel != trace.EmbeddingModel || snapshot.Parameters.EmbeddingDimension != trace.EmbeddingDimension {
 			return fmt.Errorf("case %q used a different embedding version", item.ID)
 		}
+		if trace.RerankModel != "" {
+			if observedRerankModel != "" && observedRerankModel != trace.RerankModel {
+				return fmt.Errorf("rerank model changed during capture")
+			}
+			observedRerankModel = trace.RerankModel
+			snapshot.Parameters.RerankProvider, snapshot.Parameters.RerankModel = trace.RerankProvider, trace.RerankModel
+		}
 		observed := rageval.Observation{CaseID: item.ID, Query: item.Query, EmbeddingMS: trace.EmbeddingMS, SearchMS: trace.SearchMS, KeywordSearchMS: trace.KeywordSearchMS, TotalMS: trace.TotalMS, SelectedChunkIDs: trace.SelectedChunkIDs}
+		observed.RerankMS, observed.RerankEstimatedTokens, observed.RerankInputTokens, observed.RerankBilledSearchUnits = trace.RerankMS, trace.RerankEstimatedTokens, trace.RerankInputTokens, trace.RerankBilledSearchUnits
 		for _, candidate := range trace.Candidates {
 			observed.Candidates = append(observed.Candidates, rageval.Candidate{
 				KnowledgeBaseID: candidate.KnowledgeBaseID, DocumentID: candidate.DocumentID,
@@ -288,6 +310,7 @@ func capture(args []string) error {
 				TokenCount: candidate.TokenCount, Similarity: candidate.Similarity,
 				VectorRank: candidate.VectorRank, KeywordRank: candidate.KeywordRank,
 				KeywordScore: candidate.KeywordScore, FusionScore: candidate.FusionScore,
+				PreRerankRank: candidate.PreRerankRank, RerankRank: candidate.RerankRank, RerankScore: candidate.RerankScore,
 			})
 		}
 		snapshot.Cases = append(snapshot.Cases, observed)

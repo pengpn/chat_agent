@@ -16,6 +16,7 @@ import (
 
 	"github.com/example/agent-platform/backend/internal/embeddinggateway"
 	"github.com/example/agent-platform/backend/internal/repository"
+	"github.com/example/agent-platform/backend/internal/rerankgateway"
 	"github.com/example/agent-platform/backend/internal/service"
 )
 
@@ -40,22 +41,29 @@ type Case struct {
 }
 
 type Parameters struct {
-	ChunkTargetTokens   int64   `json:"chunkTargetTokens"`
-	ChunkOverlapTokens  int64   `json:"chunkOverlapTokens"`
-	CandidateLimit      int     `json:"candidateLimit"`
-	TopK                int     `json:"topK"`
-	SimilarityThreshold float64 `json:"similarityThreshold"`
-	ContextTokenBudget  int64   `json:"contextTokenBudget"`
-	PromptVersion       string  `json:"promptVersion"`
-	RetrievalMode       string  `json:"retrievalMode"`
-	EmbeddingProvider   string  `json:"embeddingProvider"`
-	EmbeddingModel      string  `json:"embeddingModel"`
-	EmbeddingDimension  int     `json:"embeddingDimension"`
-	EmbeddingTokenizer  string  `json:"embeddingTokenizer"`
-	GenerationProvider  string  `json:"generationProvider,omitempty"`
-	GenerationModel     string  `json:"generationModel,omitempty"`
-	RRFK                int     `json:"rrfK,omitempty"`
-	KeywordVersion      int     `json:"keywordVersion,omitempty"`
+	ChunkTargetTokens    int64   `json:"chunkTargetTokens"`
+	ChunkOverlapTokens   int64   `json:"chunkOverlapTokens"`
+	CandidateLimit       int     `json:"candidateLimit"`
+	TopK                 int     `json:"topK"`
+	SimilarityThreshold  float64 `json:"similarityThreshold"`
+	ContextTokenBudget   int64   `json:"contextTokenBudget"`
+	PromptVersion        string  `json:"promptVersion"`
+	RetrievalMode        string  `json:"retrievalMode"`
+	EmbeddingProvider    string  `json:"embeddingProvider"`
+	EmbeddingModel       string  `json:"embeddingModel"`
+	EmbeddingDimension   int     `json:"embeddingDimension"`
+	EmbeddingTokenizer   string  `json:"embeddingTokenizer"`
+	GenerationProvider   string  `json:"generationProvider,omitempty"`
+	GenerationModel      string  `json:"generationModel,omitempty"`
+	RRFK                 int     `json:"rrfK,omitempty"`
+	KeywordVersion       int     `json:"keywordVersion,omitempty"`
+	RerankEnabled        bool    `json:"rerankEnabled,omitempty"`
+	RerankProvider       string  `json:"rerankProvider,omitempty"`
+	RerankModel          string  `json:"rerankModel,omitempty"`
+	RerankTokenizer      string  `json:"rerankTokenizer,omitempty"`
+	RerankMaxDocuments   int     `json:"rerankMaxDocuments,omitempty"`
+	RerankMaxPairTokens  int64   `json:"rerankMaxPairTokens,omitempty"`
+	RerankMaxTotalTokens int64   `json:"rerankMaxTotalTokens,omitempty"`
 }
 
 // Snapshot 保存一次实验。抓取命令先写入检索数据；复核人员再补充回答、
@@ -72,19 +80,22 @@ type Snapshot struct {
 }
 
 type Candidate struct {
-	KnowledgeBaseID string  `json:"knowledgeBaseId"`
-	DocumentID      string  `json:"documentId"`
-	DocumentName    string  `json:"documentName"`
-	ChunkID         string  `json:"chunkId"`
-	ChunkIndex      int     `json:"chunkIndex"`
-	Content         string  `json:"content"`
-	ContentHash     string  `json:"contentHash"`
-	TokenCount      int64   `json:"tokenCount"`
-	Similarity      float64 `json:"similarity"`
-	VectorRank      int     `json:"vectorRank,omitempty"`
-	KeywordRank     int     `json:"keywordRank,omitempty"`
-	KeywordScore    float64 `json:"keywordScore,omitempty"`
-	FusionScore     float64 `json:"fusionScore,omitempty"`
+	KnowledgeBaseID string   `json:"knowledgeBaseId"`
+	DocumentID      string   `json:"documentId"`
+	DocumentName    string   `json:"documentName"`
+	ChunkID         string   `json:"chunkId"`
+	ChunkIndex      int      `json:"chunkIndex"`
+	Content         string   `json:"content"`
+	ContentHash     string   `json:"contentHash"`
+	TokenCount      int64    `json:"tokenCount"`
+	Similarity      float64  `json:"similarity"`
+	VectorRank      int      `json:"vectorRank,omitempty"`
+	KeywordRank     int      `json:"keywordRank,omitempty"`
+	KeywordScore    float64  `json:"keywordScore,omitempty"`
+	FusionScore     float64  `json:"fusionScore,omitempty"`
+	PreRerankRank   int      `json:"preRerankRank,omitempty"`
+	RerankRank      int      `json:"rerankRank,omitempty"`
+	RerankScore     *float64 `json:"rerankScore,omitempty"`
 }
 
 type Claim struct {
@@ -94,19 +105,23 @@ type Claim struct {
 }
 
 type Observation struct {
-	CaseID           string      `json:"caseId"`
-	Query            string      `json:"query"`
-	Candidates       []Candidate `json:"candidates"`
-	SelectedChunkIDs []string    `json:"selectedChunkIds,omitempty"`
-	EmbeddingMS      int64       `json:"embeddingMs"`
-	SearchMS         int64       `json:"searchMs"`
-	KeywordSearchMS  int64       `json:"keywordSearchMs"`
-	TotalMS          int64       `json:"totalMs"`
-	Answer           string      `json:"answer,omitempty"`
-	AnswerCorrect    *bool       `json:"answerCorrect,omitempty"`
-	Claims           []Claim     `json:"claims,omitempty"`
-	CitedDocumentIDs []string    `json:"citedDocumentIds,omitempty"`
-	GenerationMS     int64       `json:"generationMs,omitempty"`
+	CaseID                  string      `json:"caseId"`
+	Query                   string      `json:"query"`
+	Candidates              []Candidate `json:"candidates"`
+	SelectedChunkIDs        []string    `json:"selectedChunkIds,omitempty"`
+	EmbeddingMS             int64       `json:"embeddingMs"`
+	SearchMS                int64       `json:"searchMs"`
+	KeywordSearchMS         int64       `json:"keywordSearchMs"`
+	TotalMS                 int64       `json:"totalMs"`
+	Answer                  string      `json:"answer,omitempty"`
+	AnswerCorrect           *bool       `json:"answerCorrect,omitempty"`
+	Claims                  []Claim     `json:"claims,omitempty"`
+	CitedDocumentIDs        []string    `json:"citedDocumentIds,omitempty"`
+	GenerationMS            int64       `json:"generationMs,omitempty"`
+	RerankMS                int64       `json:"rerankMs"`
+	RerankEstimatedTokens   int64       `json:"rerankEstimatedTokens,omitempty"`
+	RerankInputTokens       *int64      `json:"rerankInputTokens,omitempty"`
+	RerankBilledSearchUnits *float64    `json:"rerankBilledSearchUnits,omitempty"`
 }
 
 type CaseResult struct {
@@ -127,6 +142,7 @@ type CaseResult struct {
 	SearchMS            int64    `json:"searchMs"`
 	KeywordSearchMS     int64    `json:"keywordSearchMs"`
 	GenerationMS        int64    `json:"generationMs,omitempty"`
+	RerankMS            int64    `json:"rerankMs"`
 }
 
 type Summary struct {
@@ -152,6 +168,7 @@ type Summary struct {
 	MeanSearchMS        float64      `json:"meanSearchMs"`
 	MeanKeywordSearchMS float64      `json:"meanKeywordSearchMs"`
 	MeanGenerationMS    *float64     `json:"meanGenerationMs,omitempty"`
+	MeanRerankMS        float64      `json:"meanRerankMs"`
 	Cases               []CaseResult `json:"cases"`
 }
 
@@ -179,7 +196,10 @@ func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
 	var noEvidenceCorrect float64
 	for _, gold := range dataset.Cases {
 		observed := byID[gold.ID]
-		result := evaluateCase(gold, observed, snapshot.Parameters, estimator)
+		result, err := evaluateCase(gold, observed, snapshot.Parameters, estimator)
+		if err != nil {
+			return Summary{}, err
+		}
 		summary.Cases = append(summary.Cases, result)
 		if len(gold.RelevantDocuments) > 0 {
 			summary.AnswerableCount++
@@ -196,6 +216,7 @@ func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
 		summary.MeanEmbeddingMS += float64(result.EmbeddingMS)
 		summary.MeanSearchMS += float64(result.SearchMS)
 		summary.MeanKeywordSearchMS += float64(result.KeywordSearchMS)
+		summary.MeanRerankMS += float64(result.RerankMS)
 		if result.Faithfulness != nil {
 			summary.GenerationGraded++
 			faith += *result.Faithfulness
@@ -221,6 +242,7 @@ func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
 	summary.MeanEmbeddingMS /= n
 	summary.MeanSearchMS /= n
 	summary.MeanKeywordSearchMS /= n
+	summary.MeanRerankMS /= n
 	if summary.GenerationGraded > 0 {
 		g := float64(summary.GenerationGraded)
 		summary.Faithfulness = ptr(faith / g)
@@ -267,6 +289,9 @@ func ValidateSnapshot(dataset Dataset, snapshot Snapshot) error {
 	if p.RetrievalMode == service.RetrievalModeHybrid && (p.RRFK <= 0 || p.RRFK > 10000 || p.KeywordVersion <= 0) {
 		return fmt.Errorf("hybrid snapshot must record RRF constant and keyword version")
 	}
+	if p.RerankEnabled && (p.RerankProvider == "" || p.RerankModel == "" || p.RerankTokenizer == "" || p.RerankMaxDocuments <= 0 || p.RerankMaxDocuments > 400 || p.RerankMaxPairTokens <= 0 || p.RerankMaxTotalTokens <= 0) {
+		return fmt.Errorf("reranked snapshot must record model and admission limits")
+	}
 	if p.CandidateLimit <= 0 || p.CandidateLimit > 200 || p.TopK <= 0 || p.TopK > p.CandidateLimit || p.ContextTokenBudget <= 0 || math.IsNaN(p.SimilarityThreshold) || math.IsInf(p.SimilarityThreshold, 0) || p.SimilarityThreshold < 0 || p.SimilarityThreshold > 1 || p.ChunkTargetTokens <= 0 || p.ChunkOverlapTokens < 0 || p.ChunkOverlapTokens >= p.ChunkTargetTokens || p.PromptVersion == "" || p.RetrievalMode == "" || p.EmbeddingProvider == "" || p.EmbeddingModel == "" || p.EmbeddingDimension <= 0 || p.EmbeddingTokenizer == "" {
 		return fmt.Errorf("snapshot %q has invalid experiment parameters", snapshot.Name)
 	}
@@ -295,13 +320,28 @@ func ValidateSnapshot(dataset Dataset, snapshot Snapshot) error {
 		if item.EmbeddingMS < 0 || item.SearchMS < 0 || item.KeywordSearchMS < 0 || item.TotalMS < 0 || item.GenerationMS < 0 {
 			return fmt.Errorf("case %q has negative latency", item.CaseID)
 		}
+		if item.RerankMS < 0 || item.RerankEstimatedTokens < 0 || (item.RerankInputTokens != nil && *item.RerankInputTokens < 0) || (item.RerankBilledSearchUnits != nil && (*item.RerankBilledSearchUnits < 0 || math.IsNaN(*item.RerankBilledSearchUnits) || math.IsInf(*item.RerankBilledSearchUnits, 0))) {
+			return fmt.Errorf("case %q has invalid rerank observation", item.CaseID)
+		}
+		if p.RerankEnabled && len(item.Candidates) > p.RerankMaxDocuments {
+			return fmt.Errorf("reranked pool exceeds document limit")
+		}
 		chunkIDs := make(map[string]bool, len(item.Candidates))
 		vectorRanks, keywordRanks := make(map[int]bool), make(map[int]bool)
+		preRerankRanks, rerankRanks := make(map[int]bool), make(map[int]bool)
 		for _, candidate := range item.Candidates {
 			if candidate.ChunkID == "" || candidate.DocumentID == "" || candidate.KnowledgeBaseID == "" || chunkIDs[candidate.ChunkID] || math.IsNaN(candidate.Similarity) || math.IsInf(candidate.Similarity, 0) {
 				return fmt.Errorf("case %q has invalid candidate", item.CaseID)
 			}
 			chunkIDs[candidate.ChunkID] = true
+			if p.RerankEnabled {
+				if candidate.RerankScore == nil || math.IsNaN(*candidate.RerankScore) || math.IsInf(*candidate.RerankScore, 0) || candidate.PreRerankRank <= 0 || candidate.PreRerankRank > len(item.Candidates) || candidate.RerankRank <= 0 || candidate.RerankRank > len(item.Candidates) || preRerankRanks[candidate.PreRerankRank] || rerankRanks[candidate.RerankRank] {
+					return fmt.Errorf("case %q has invalid rerank permutation", item.CaseID)
+				}
+				preRerankRanks[candidate.PreRerankRank], rerankRanks[candidate.RerankRank] = true, true
+			} else if candidate.RerankScore != nil || candidate.PreRerankRank != 0 || candidate.RerankRank != 0 {
+				return fmt.Errorf("rerank fields present in a disabled experiment")
+			}
 			if p.RetrievalMode == service.RetrievalModeHybrid {
 				if candidate.VectorRank < 0 || candidate.KeywordRank < 0 || candidate.VectorRank > p.CandidateLimit || candidate.KeywordRank > p.CandidateLimit || (candidate.VectorRank == 0 && candidate.KeywordRank == 0) || candidate.KeywordScore < 0 || math.IsNaN(candidate.KeywordScore) || math.IsInf(candidate.KeywordScore, 0) {
 					return fmt.Errorf("case %q has invalid hybrid candidate ranks", item.CaseID)
@@ -330,7 +370,10 @@ func ValidateSnapshot(dataset Dataset, snapshot Snapshot) error {
 				return fmt.Errorf("keyword ranks must be contiguous")
 			}
 		}
-		selected := replayCandidates(item.Candidates, estimator, p)
+		selected, err := replayCandidates(item.Candidates, estimator, p)
+		if err != nil {
+			return err
+		}
 		if item.SelectedChunkIDs != nil {
 			selectedIDs := make([]string, 0, len(selected.Matches))
 			for _, match := range selected.Matches {
@@ -380,15 +423,18 @@ func Compare(dataset Dataset, snapshots []Snapshot) ([]Summary, error) {
 	return results, nil
 }
 
-func evaluateCase(gold Case, observed Observation, p Parameters, estimator embeddinggateway.TokenEstimator) CaseResult {
+func evaluateCase(gold Case, observed Observation, p Parameters, estimator embeddinggateway.TokenEstimator) (CaseResult, error) {
 	allChunkIDs := make([]string, 0, len(observed.Candidates))
 	candidateDocs := make(map[string]bool)
 	for _, item := range observed.Candidates {
 		allChunkIDs = append(allChunkIDs, item.ChunkID)
 		candidateDocs[item.DocumentID] = true
 	}
-	selected := replayCandidates(observed.Candidates, estimator, p)
-	result := CaseResult{CaseID: gold.ID, CandidateChunkIDs: allChunkIDs, EmbeddingMS: observed.EmbeddingMS, SearchMS: observed.SearchMS, KeywordSearchMS: observed.KeywordSearchMS, GenerationMS: observed.GenerationMS}
+	selected, err := replayCandidates(observed.Candidates, estimator, p)
+	if err != nil {
+		return CaseResult{}, err
+	}
+	result := CaseResult{CaseID: gold.ID, CandidateChunkIDs: allChunkIDs, EmbeddingMS: observed.EmbeddingMS, SearchMS: observed.SearchMS, KeywordSearchMS: observed.KeywordSearchMS, GenerationMS: observed.GenerationMS, RerankMS: observed.RerankMS}
 	selectedDocs := make(map[string]bool)
 	for _, match := range selected.Matches {
 		result.SelectedChunkIDs = append(result.SelectedChunkIDs, match.ChunkID)
@@ -445,10 +491,10 @@ func evaluateCase(gold Case, observed Observation, p Parameters, estimator embed
 			}
 		}
 	}
-	return result
+	return result, nil
 }
 
-func replayCandidates(candidates []Candidate, estimator embeddinggateway.TokenEstimator, p Parameters) service.KnowledgeRetrievalResult {
+func replayCandidates(candidates []Candidate, estimator embeddinggateway.TokenEstimator, p Parameters) (service.KnowledgeRetrievalResult, error) {
 	rows := make([]repository.KnowledgeSearchRow, 0, len(candidates))
 	for _, item := range candidates {
 		rows = append(rows, repository.KnowledgeSearchRow{
@@ -456,7 +502,11 @@ func replayCandidates(candidates []Candidate, estimator embeddinggateway.TokenEs
 			ChunkID: item.ChunkID, ChunkIndex: item.ChunkIndex, Content: item.Content,
 			ContentHash: item.ContentHash, TokenCount: item.TokenCount, Similarity: item.Similarity,
 			VectorRank: item.VectorRank, KeywordRank: item.KeywordRank, KeywordScore: item.KeywordScore, FusionScore: item.FusionScore,
+			PreRerankRank: item.PreRerankRank, RerankRank: item.RerankRank,
 		})
+		if item.RerankScore != nil {
+			rows[len(rows)-1].RerankScore = *item.RerankScore
+		}
 	}
 	if p.RetrievalMode == service.RetrievalModeHybrid {
 		var vector, keyword []repository.KnowledgeSearchRow
@@ -472,11 +522,35 @@ func replayCandidates(candidates []Candidate, estimator embeddinggateway.TokenEs
 		sort.Slice(keyword, func(i, j int) bool { return keyword[i].KeywordRank < keyword[j].KeywordRank })
 		rows = service.FuseKnowledgeCandidates(vector, keyword, p.RRFK)
 	}
+	if p.RerankEnabled && len(rows) > 0 {
+		if p.RetrievalMode == service.RetrievalModeVector {
+			sort.Slice(rows, func(i, j int) bool { return rows[i].PreRerankRank < rows[j].PreRerankRank })
+		}
+		items := make([]rerankgateway.Item, len(rows))
+		originalRanks := make(map[string]int, len(rows))
+		for i, row := range rows {
+			if row.PreRerankRank != i+1 {
+				return service.KnowledgeRetrievalResult{}, fmt.Errorf("recorded pre-rerank order differs from retrieval replay")
+			}
+			items[i] = rerankgateway.Item{Index: i, Score: row.RerankScore}
+			originalRanks[row.ChunkID] = row.RerankRank
+		}
+		var err error
+		rows, err = service.ApplyKnowledgeRerank(rows, items)
+		if err != nil {
+			return service.KnowledgeRetrievalResult{}, err
+		}
+		for _, row := range rows {
+			if originalRanks[row.ChunkID] != row.RerankRank {
+				return service.KnowledgeRetrievalResult{}, fmt.Errorf("recorded rerank order differs from score replay")
+			}
+		}
+	}
 	selected, _ := service.SelectKnowledgeCandidates(rows, estimator, service.KnowledgeRetrievalConfig{
 		TopK: p.TopK, SimilarityThreshold: p.SimilarityThreshold, ContextTokenBudget: p.ContextTokenBudget,
 		Mode: p.RetrievalMode, RRFK: p.RRFK,
 	})
-	return selected
+	return selected, nil
 }
 
 var citationMarkers = regexp.MustCompile(`\[(\d+)\]`)

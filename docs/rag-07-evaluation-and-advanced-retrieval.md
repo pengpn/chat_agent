@@ -4,6 +4,8 @@
 
 后续延伸：[第八阶段](./rag-08-hybrid-retrieval-and-rrf.md)已提供默认关闭的关键词 + 向量 RRF 实验能力，可用本节的真实快照流程对比；默认策略仍需由真实评估结果决定。
 
+[第九阶段](./rag-09-reranker-gateway-and-evaluation.md)增加可配置的重排网关和分数重放，继续沿用本节的数据集与指标。
+
 ## 1. 数据流和代码入口
 
 ```text

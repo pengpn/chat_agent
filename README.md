@@ -22,6 +22,7 @@
 - [RAG 第六阶段：知识库与引用前端体验](./docs/rag-06-knowledge-and-citation-ui.md)
 - [RAG 第七阶段：离线评估与进阶检索决策](./docs/rag-07-evaluation-and-advanced-retrieval.md)
 - [RAG 第八阶段：关键词召回与 RRF 混合检索](./docs/rag-08-hybrid-retrieval-and-rrf.md)
+- [RAG 第九阶段：Reranker 网关与评估](./docs/rag-09-reranker-gateway-and-evaluation.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -54,6 +55,7 @@
 - RAG 引用回答：服务端知识库选择、证据约束 Prompt、引用白名单校验、事务快照和可重连 SSE 引用事件
 - RAG 离线评估：真实候选快照、Recall@K/MRR/nDCG、人工复核的忠实度与引用指标、参数重放和逐题失败归因
 - RAG 混合检索实验：中文轻量分词、PostgreSQL GIN 关键词召回、RRF 排名融合和双路诊断，默认仍使用向量基线
+- RAG 重排实验：独立 RerankGateway、兼容接口、请求前预算、取消超时、来源索引校验和可重放的重排分数，默认关闭
 - JSON Schema 结构化输出：统一请求、供应商适配、本地校验、`jsonb` 持久化与前端格式化展示
 - Docker Compose 一键启动 PostgreSQL、Redis 和 MinIO
 

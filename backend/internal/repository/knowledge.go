@@ -31,6 +31,9 @@ type KnowledgeSearchRow struct {
 	KeywordRank     int
 	KeywordScore    float64
 	FusionScore     float64
+	PreRerankRank   int
+	RerankRank      int
+	RerankScore     float64
 }
 
 // KnowledgeRepository 封装用户知识库的持久化边界。

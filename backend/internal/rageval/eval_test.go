@@ -149,6 +149,67 @@ func TestHybridEvaluationRebuildsRRFAndRetainsKeywordOnlyCandidates(t *testing.T
 	}
 }
 
+func TestRerankEvaluationReplaysScoresButCannotFixCandidateMiss(t *testing.T) {
+	dataset, baseline, _ := fixture(t)
+	data, err := os.ReadFile("../../eval/rag/demo-rerank.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reranked Snapshot
+	if err := json.Unmarshal(data, &reranked); err != nil {
+		t.Fatal(err)
+	}
+	reports, err := Compare(dataset, []Snapshot{baseline, reranked})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNear(t, reports[1].CandidateRecall, reports[0].CandidateRecall)
+	assertNear(t, reports[1].RecallAtK, 2.0/3)
+	assertNear(t, reports[1].MRRAtK, 2.0/3)
+	if reports[1].Cases[1].Outcome != "candidate_miss" || reports[1].MeanRerankMS != 20 || reports[1].GenerationGraded != 0 {
+		t.Fatalf("重排评估错误: %+v", reports[1])
+	}
+	reranked.Cases[0].Candidates[0].RerankScore = nil
+	if _, err := Evaluate(dataset, reranked); err == nil {
+		t.Fatal("不能重放缺失分数的候选")
+	}
+}
+
+func TestHybridRerankEvaluationPreservesRRFBeforeReranking(t *testing.T) {
+	dataset, _, _ := fixture(t)
+	data, err := os.ReadFile("../../eval/rag/demo-hybrid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Parameters.RerankEnabled = true
+	snapshot.Parameters.RerankProvider = "fake"
+	snapshot.Parameters.RerankModel = "rank-v1"
+	snapshot.Parameters.RerankTokenizer = "heuristic"
+	snapshot.Parameters.RerankMaxDocuments = 60
+	snapshot.Parameters.RerankMaxPairTokens = 4096
+	snapshot.Parameters.RerankMaxTotalTokens = 32768
+	for i := range snapshot.Cases {
+		for j := range snapshot.Cases[i].Candidates {
+			candidate := &snapshot.Cases[i].Candidates[j]
+			candidate.PreRerankRank = j + 1
+			candidate.RerankRank = j + 1
+			score := float64(len(snapshot.Cases[i].Candidates) - j)
+			candidate.RerankScore = &score
+		}
+	}
+	if _, err := Evaluate(dataset, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Cases[0].Candidates[0].RerankRank = 2
+	if _, err := Evaluate(dataset, snapshot); err == nil {
+		t.Fatal("重复的重排名次应报错")
+	}
+}
+
 func assertNear(t *testing.T, actual, expected float64) {
 	t.Helper()
 	if math.Abs(actual-expected) > 1e-9 {

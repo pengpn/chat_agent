@@ -21,6 +21,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/ratelimit"
 	"github.com/example/agent-platform/backend/internal/repository"
+	"github.com/example/agent-platform/backend/internal/rerankgateway"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -100,6 +101,11 @@ func main() {
 		logger.Error(context.Background(), "embedding gateway configuration failed", logger.Err(err))
 		os.Exit(1)
 	}
+	reranker, err := rerankgateway.NewConfigured(cfg.Rerank)
+	if err != nil {
+		logger.Error(context.Background(), "rerank gateway configuration failed", logger.Err(err))
+		os.Exit(1)
+	}
 	var limiter llmgateway.RateLimiter
 	if cfg.LLMRateTokensPerMinute > 0 {
 		limiter = llmgateway.NewTokenBucketLimiter(redisClient, cfg.LLMRateTokensPerMinute, cfg.LLMRateBurst, "")
@@ -121,7 +127,7 @@ func main() {
 	default:
 		emailSender = mailer.LogSender{}
 	}
-	server := httpapi.NewServerWithEmbeddingGateway(repositories, jwtManager, providers, limiter, ratelimit.NewRedis(redisClient, ""), store, emailSender, embeddings, cfg)
+	server := httpapi.NewServerWithRAGGateways(repositories, jwtManager, providers, limiter, ratelimit.NewRedis(redisClient, ""), store, emailSender, embeddings, reranker, cfg)
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
 	server.CleanupKnowledgeObjects(cleanupCtx)
 	cancelCleanup()

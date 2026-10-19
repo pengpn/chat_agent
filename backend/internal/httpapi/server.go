@@ -17,13 +17,14 @@ import (
 	"github.com/example/agent-platform/backend/internal/provider"
 	"github.com/example/agent-platform/backend/internal/ratelimit"
 	"github.com/example/agent-platform/backend/internal/repository"
+	"github.com/example/agent-platform/backend/internal/rerankgateway"
 	"github.com/example/agent-platform/backend/internal/service"
 	"github.com/example/agent-platform/backend/internal/streamcache"
 	"github.com/example/agent-platform/backend/internal/tool"
 	"github.com/example/agent-platform/backend/internal/userevent"
 )
 
-// Server owns the HTTP dependencies. Route composition lives in router.go.
+// Server 管理 HTTP 层依赖，路由组装位于 router.go。
 type Server struct {
 	handlers           *handler.Handler
 	jwt                *auth.JWTManager
@@ -42,8 +43,8 @@ func NewServer(repositories *repository.Repositories, jwtManager *auth.JWTManage
 	return NewServerWithRateLimiter(repositories, jwtManager, providers, nil, cfg)
 }
 
-// NewServerWithRateLimiter keeps HTTP composition testable while production
-// injects the Redis-backed limiter assembled in cmd/api.
+// NewServerWithRateLimiter 支持注入限流器，便于测试 HTTP 层的依赖组装。
+// 生产环境由 cmd/api 创建并注入 Redis 限流器。
 func NewServerWithRateLimiter(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, limiter llmgateway.RateLimiter, cfg config.Config) *Server {
 	return NewServerWithObjectStore(repositories, jwtManager, providers, limiter, objectstore.NewMemory(), cfg)
 }
@@ -56,9 +57,13 @@ func NewServerWithDependencies(repositories *repository.Repositories, jwtManager
 	return NewServerWithEmbeddingGateway(repositories, jwtManager, providers, llmLimiter, authLimiter, store, emailSender, nil, cfg)
 }
 
-// NewServerWithEmbeddingGateway is the production composition root for RAG.
-// The older constructor remains available to keep focused HTTP tests simple.
+// NewServerWithEmbeddingGateway 保留只注入 EmbeddingGateway 的调用方式。
 func NewServerWithEmbeddingGateway(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, llmLimiter llmgateway.RateLimiter, authLimiter ratelimit.Limiter, store objectstore.Store, emailSender mailer.Sender, embeddings embeddinggateway.Gateway, cfg config.Config) *Server {
+	return NewServerWithRAGGateways(repositories, jwtManager, providers, llmLimiter, authLimiter, store, emailSender, embeddings, nil, cfg)
+}
+
+// NewServerWithRAGGateways 在应用入口注入 RAG 模型网关，业务层不组装供应商客户端。
+func NewServerWithRAGGateways(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, llmLimiter llmgateway.RateLimiter, authLimiter ratelimit.Limiter, store objectstore.Store, emailSender mailer.Sender, embeddings embeddinggateway.Gateway, reranker rerankgateway.Gateway, cfg config.Config) *Server {
 	streams := streamcache.New(cfg.StreamCacheTTL, cfg.StreamCacheMaxEvents)
 	userEvents := userevent.New(cfg.UserEventTTL, cfg.UserEventMaxEvents)
 	attachments := service.NewAttachment(repositories.Conversations, repositories.Attachments, store, providers, service.AttachmentConfig{
@@ -153,7 +158,9 @@ func NewServerWithEmbeddingGateway(repositories *repository.Repositories, jwtMan
 		TraceEnabled:        cfg.Knowledge.RetrievalTraceEnabled,
 		Mode:                cfg.Knowledge.RetrievalMode,
 		RRFK:                cfg.Knowledge.RetrievalRRFK,
+		RerankEnabled:       cfg.Rerank.Enabled,
 	})
+	retrievalService.ConfigureReranker(reranker)
 	chatService.ConfigureKnowledgeRetrieval(retrievalService)
 	handlers.ConfigureKnowledgeRetrieval(retrievalService)
 	return &Server{
@@ -171,7 +178,7 @@ func NewServerWithEmbeddingGateway(repositories *repository.Repositories, jwtMan
 	}
 }
 
-// CleanupKnowledgeObjects retries transactional object-deletion outbox tasks.
+// CleanupKnowledgeObjects 重试事务性发件箱中尚未完成的对象删除任务。
 func (s *Server) CleanupKnowledgeObjects(ctx context.Context) {
 	if s.knowledge != nil {
 		s.knowledge.DrainObjectCleanup(ctx)
