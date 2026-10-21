@@ -161,6 +161,7 @@ func NewServerWithRAGGateways(repositories *repository.Repositories, jwtManager 
 		RerankEnabled:       cfg.Rerank.Enabled,
 	})
 	retrievalService.ConfigureReranker(reranker)
+	retrievalService.ConfigureQueryRewriter(service.NewQueryRewriter(gateway, cfg.QueryRewrite))
 	chatService.ConfigureKnowledgeRetrieval(retrievalService)
 	handlers.ConfigureKnowledgeRetrieval(retrievalService)
 	return &Server{

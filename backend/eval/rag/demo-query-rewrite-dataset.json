@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-query-rewrite-v1",
+  "corpusVersion": "synthetic-subscription-policy-v1",
+  "cases": [
+    {
+      "id": "coreference",
+      "query": "它的退款期限是什么？",
+      "history": [
+        {"role": "user", "content": "介绍一下专业版订阅。"},
+        {"role": "assistant", "content": "专业版提供按月订阅。"}
+      ],
+      "goldAnswer": "专业版订阅付款后七日内可以申请退款。",
+      "relevantDocuments": {"doc-pro-refund": 3},
+      "expectedCitationDocumentIds": ["doc-pro-refund"]
+    },
+    {
+      "id": "literal-preservation",
+      "query": "SKU-42在2026年7月之前不能退款吗？",
+      "history": [],
+      "goldAnswer": "SKU-42在2026年7月之前不可退款。",
+      "relevantDocuments": {"doc-sku-42": 3},
+      "expectedCitationDocumentIds": ["doc-sku-42"]
+    },
+    {
+      "id": "ambiguous",
+      "query": "它支持企业发票吗？",
+      "history": [
+        {"role": "user", "content": "比较一下基础版和专业版。"},
+        {"role": "assistant", "content": "两个版本有不同的订阅选项。"}
+      ],
+      "goldAnswer": "请先确认要询问基础版还是专业版，现有资料不足以明确回答。",
+      "relevantDocuments": {},
+      "expectedCitationDocumentIds": []
+    }
+  ]
+}

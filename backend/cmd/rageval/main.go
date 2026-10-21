@@ -215,6 +215,12 @@ func capture(args []string) error {
 		RerankEnabled: cfg.Rerank.Enabled,
 	})
 	retrieval.ConfigureReranker(reranker)
+	rewriter, cleanupRewriter, err := newQueryRewriter(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanupRewriter()
+	retrieval.ConfigureQueryRewriter(rewriter)
 	baseIDs := make(map[string]bool)
 	for _, item := range dataset.Cases {
 		if len(item.KnowledgeBaseIDs) == 0 {
@@ -277,10 +283,18 @@ func capture(args []string) error {
 		snapshot.Parameters.RerankTokenizer = cfg.Rerank.Tokenizer
 		snapshot.Parameters.RerankMaxDocuments, snapshot.Parameters.RerankMaxPairTokens, snapshot.Parameters.RerankMaxTotalTokens = cfg.Rerank.MaxDocuments, cfg.Rerank.MaxPairTokens, cfg.Rerank.MaxTotalTokens
 	}
+	if cfg.QueryRewrite.Enabled {
+		r := cfg.QueryRewrite
+		snapshot.Parameters.QueryRewrite = &rageval.QueryRewriteParameters{
+			Provider: r.Provider, Model: r.Model, PromptVersion: service.QueryRewritePromptVersion,
+			MaxHistoryMessages: r.MaxHistoryMessages, MaxHistoryChars: r.MaxHistoryChars,
+			MaxInputTokens: r.MaxInputTokens, MaxOutputTokens: r.MaxOutputTokens, TimeoutMS: r.Timeout.Milliseconds(),
+		}
+	}
 	observedRerankModel := ""
 	for _, item := range dataset.Cases {
 		_, trace, err := retrieval.SearchWithTrace(ctx, *userID, service.KnowledgeRetrievalRequest{
-			Query: item.Query, KnowledgeBaseIDs: item.KnowledgeBaseIDs,
+			Query: item.Query, KnowledgeBaseIDs: item.KnowledgeBaseIDs, History: item.History,
 		})
 		if err != nil {
 			return fmt.Errorf("case %q: %w", item.ID, err)
@@ -301,6 +315,7 @@ func capture(args []string) error {
 			snapshot.Parameters.RerankProvider, snapshot.Parameters.RerankModel = trace.RerankProvider, trace.RerankModel
 		}
 		observed := rageval.Observation{CaseID: item.ID, Query: item.Query, EmbeddingMS: trace.EmbeddingMS, SearchMS: trace.SearchMS, KeywordSearchMS: trace.KeywordSearchMS, TotalMS: trace.TotalMS, SelectedChunkIDs: trace.SelectedChunkIDs}
+		observed.RetrievalQuery, observed.HistoryHash, observed.Rewrite = trace.RetrievalQuery, rageval.HistoryFingerprint(item.History), &trace.Rewrite
 		observed.RerankMS, observed.RerankEstimatedTokens, observed.RerankInputTokens, observed.RerankBilledSearchUnits = trace.RerankMS, trace.RerankEstimatedTokens, trace.RerankInputTokens, trace.RerankBilledSearchUnits
 		for _, candidate := range trace.Candidates {
 			observed.Candidates = append(observed.Candidates, rageval.Candidate{

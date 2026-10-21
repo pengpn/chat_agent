@@ -33,7 +33,7 @@ var citationMarkerPattern = regexp.MustCompile(`\[(\d+)\]`)
 
 // applyGrounding 按权限过滤后检索知识库，并在当前用户消息正前方插入一条服务端系统消息。
 // 检索结果以 JSON 数据附在用户消息里，只当作资料，不能当成模型可以执行的指令。
-func (s *ChatService) applyGrounding(ctx context.Context, session *ChatSession, query string, knowledgeBaseIDs []string, request *provider.ChatRequest) error {
+func (s *ChatService) applyGrounding(ctx context.Context, session *ChatSession, query string, knowledgeBaseIDs []string, history []model.Message, request *provider.ChatRequest) error {
 	baseIDs := uniqueStrings(knowledgeBaseIDs)
 	if len(baseIDs) == 0 {
 		return nil
@@ -42,7 +42,7 @@ func (s *ChatService) applyGrounding(ctx context.Context, session *ChatSession, 
 		return ErrEmbeddingNotConfigured
 	}
 	result, err := s.retrieval.Search(ctx, session.UserID, KnowledgeRetrievalRequest{
-		Query: query, KnowledgeBaseIDs: baseIDs,
+		Query: query, KnowledgeBaseIDs: baseIDs, History: queryRewriteHistory(history),
 	})
 	if err != nil {
 		return err

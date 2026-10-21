@@ -34,6 +34,8 @@ type KnowledgeRetrievalConfig struct {
 // 调用方只能将其保存在有访问控制的位置。
 type KnowledgeRetrievalTrace struct {
 	Query                   string                    `json:"query"`
+	RetrievalQuery          string                    `json:"retrievalQuery"`
+	Rewrite                 QueryRewriteObservation   `json:"rewrite"`
 	KnowledgeBaseIDs        []string                  `json:"knowledgeBaseIds"`
 	Candidates              []KnowledgeCandidateTrace `json:"candidates"`
 	SelectedChunkIDs        []string                  `json:"selectedChunkIds"`
@@ -87,6 +89,8 @@ type KnowledgeCandidateTrace struct {
 type KnowledgeRetrievalRequest struct {
 	Query            string   `json:"query"`
 	KnowledgeBaseIDs []string `json:"knowledgeBaseIds"`
+	// 历史只能来自服务端选中的对话分支或离线评估集，不能从公开检索接口注入。
+	History []QueryRewriteTurn `json:"-"`
 }
 
 type KnowledgeRetrievalMatch struct {
@@ -132,6 +136,7 @@ type KnowledgeRetrievalService struct {
 	estimator  chunkTokenEstimator
 	config     KnowledgeRetrievalConfig
 	reranker   rerankgateway.Gateway
+	rewriter   *QueryRewriter
 }
 
 func NewKnowledgeRetrieval(repository repository.KnowledgeRepository, embeddings embeddinggateway.Gateway, estimator chunkTokenEstimator, cfg KnowledgeRetrievalConfig) *KnowledgeRetrievalService {
@@ -207,6 +212,14 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 	if s.embeddings == nil {
 		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, ErrEmbeddingNotConfigured
 	}
+	originalQuery := query
+	query, rewrite, err := s.rewriter.Rewrite(ctx, userID, query, request.History, s.config.MaxQueryChars)
+	if err != nil {
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return KnowledgeRetrievalResult{}, KnowledgeRetrievalTrace{}, err
+	}
 	embeddingStarted := time.Now()
 	embedded, err := s.embeddings.EmbedQuery(ctx, embeddinggateway.Request{
 		OperationID: "knowledge-query:" + uuid.NewString(), Purpose: "rag_query",
@@ -266,7 +279,7 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 	trace := KnowledgeRetrievalTrace{}
 	if captureTrace {
 		trace = KnowledgeRetrievalTrace{
-			Query: query, KnowledgeBaseIDs: baseIDs, Candidates: decisions,
+			Query: originalQuery, RetrievalQuery: query, Rewrite: rewrite, KnowledgeBaseIDs: baseIDs, Candidates: decisions,
 			EmbeddingProvider: embedded.Provider, EmbeddingModel: embedded.Model, EmbeddingDimension: embedded.Dimension,
 			PromptVersion: groundingPromptVersion, CandidateLimit: s.config.CandidateLimit, TopK: s.config.TopK,
 			Threshold: s.config.SimilarityThreshold, ContextTokenBudget: s.config.ContextTokenBudget,
@@ -290,6 +303,7 @@ func (s *KnowledgeRetrievalService) search(ctx context.Context, userID string, r
 		}
 	}
 	logger.Info(ctx, "knowledge retrieval completed",
+		logger.String("rewrite_status", rewrite.Status), logger.Int64("rewrite_ms", rewrite.LatencyMS),
 		logger.String("user_id", userID), logger.Int("knowledge_base_count", len(baseIDs)),
 		logger.Int("candidate_count", len(candidates)), logger.Int("result_count", len(result.Matches)),
 		logger.String("retrieval_mode", s.config.Mode), logger.Int("vector_candidate_count", vectorCandidateCount),

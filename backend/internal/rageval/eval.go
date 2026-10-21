@@ -32,38 +32,52 @@ type Dataset struct {
 }
 
 type Case struct {
-	ID                          string         `json:"id"`
-	Query                       string         `json:"query"`
-	KnowledgeBaseIDs            []string       `json:"knowledgeBaseIds,omitempty"`
-	GoldAnswer                  string         `json:"goldAnswer"`
-	RelevantDocuments           map[string]int `json:"relevantDocuments"`
-	ExpectedCitationDocumentIDs []string       `json:"expectedCitationDocumentIds"`
+	ID                          string                     `json:"id"`
+	Query                       string                     `json:"query"`
+	History                     []service.QueryRewriteTurn `json:"history,omitempty"`
+	KnowledgeBaseIDs            []string                   `json:"knowledgeBaseIds,omitempty"`
+	GoldAnswer                  string                     `json:"goldAnswer"`
+	RelevantDocuments           map[string]int             `json:"relevantDocuments"`
+	ExpectedCitationDocumentIDs []string                   `json:"expectedCitationDocumentIds"`
 }
 
 type Parameters struct {
-	ChunkTargetTokens    int64   `json:"chunkTargetTokens"`
-	ChunkOverlapTokens   int64   `json:"chunkOverlapTokens"`
-	CandidateLimit       int     `json:"candidateLimit"`
-	TopK                 int     `json:"topK"`
-	SimilarityThreshold  float64 `json:"similarityThreshold"`
-	ContextTokenBudget   int64   `json:"contextTokenBudget"`
-	PromptVersion        string  `json:"promptVersion"`
-	RetrievalMode        string  `json:"retrievalMode"`
-	EmbeddingProvider    string  `json:"embeddingProvider"`
-	EmbeddingModel       string  `json:"embeddingModel"`
-	EmbeddingDimension   int     `json:"embeddingDimension"`
-	EmbeddingTokenizer   string  `json:"embeddingTokenizer"`
-	GenerationProvider   string  `json:"generationProvider,omitempty"`
-	GenerationModel      string  `json:"generationModel,omitempty"`
-	RRFK                 int     `json:"rrfK,omitempty"`
-	KeywordVersion       int     `json:"keywordVersion,omitempty"`
-	RerankEnabled        bool    `json:"rerankEnabled,omitempty"`
-	RerankProvider       string  `json:"rerankProvider,omitempty"`
-	RerankModel          string  `json:"rerankModel,omitempty"`
-	RerankTokenizer      string  `json:"rerankTokenizer,omitempty"`
-	RerankMaxDocuments   int     `json:"rerankMaxDocuments,omitempty"`
-	RerankMaxPairTokens  int64   `json:"rerankMaxPairTokens,omitempty"`
-	RerankMaxTotalTokens int64   `json:"rerankMaxTotalTokens,omitempty"`
+	QueryRewrite         *QueryRewriteParameters `json:"queryRewrite,omitempty"`
+	ChunkTargetTokens    int64                   `json:"chunkTargetTokens"`
+	ChunkOverlapTokens   int64                   `json:"chunkOverlapTokens"`
+	CandidateLimit       int                     `json:"candidateLimit"`
+	TopK                 int                     `json:"topK"`
+	SimilarityThreshold  float64                 `json:"similarityThreshold"`
+	ContextTokenBudget   int64                   `json:"contextTokenBudget"`
+	PromptVersion        string                  `json:"promptVersion"`
+	RetrievalMode        string                  `json:"retrievalMode"`
+	EmbeddingProvider    string                  `json:"embeddingProvider"`
+	EmbeddingModel       string                  `json:"embeddingModel"`
+	EmbeddingDimension   int                     `json:"embeddingDimension"`
+	EmbeddingTokenizer   string                  `json:"embeddingTokenizer"`
+	GenerationProvider   string                  `json:"generationProvider,omitempty"`
+	GenerationModel      string                  `json:"generationModel,omitempty"`
+	RRFK                 int                     `json:"rrfK,omitempty"`
+	KeywordVersion       int                     `json:"keywordVersion,omitempty"`
+	RerankEnabled        bool                    `json:"rerankEnabled,omitempty"`
+	RerankProvider       string                  `json:"rerankProvider,omitempty"`
+	RerankModel          string                  `json:"rerankModel,omitempty"`
+	RerankTokenizer      string                  `json:"rerankTokenizer,omitempty"`
+	RerankMaxDocuments   int                     `json:"rerankMaxDocuments,omitempty"`
+	RerankMaxPairTokens  int64                   `json:"rerankMaxPairTokens,omitempty"`
+	RerankMaxTotalTokens int64                   `json:"rerankMaxTotalTokens,omitempty"`
+}
+
+// QueryRewriteParameters 记录影响改写的全部服务端配置，避免只比较模型名字。
+type QueryRewriteParameters struct {
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	PromptVersion      string `json:"promptVersion"`
+	MaxHistoryMessages int    `json:"maxHistoryMessages"`
+	MaxHistoryChars    int    `json:"maxHistoryChars"`
+	MaxInputTokens     int64  `json:"maxInputTokens"`
+	MaxOutputTokens    int64  `json:"maxOutputTokens"`
+	TimeoutMS          int64  `json:"timeoutMs"`
 }
 
 // Snapshot 保存一次实验。抓取命令先写入检索数据；复核人员再补充回答、
@@ -105,26 +119,32 @@ type Claim struct {
 }
 
 type Observation struct {
-	CaseID                  string      `json:"caseId"`
-	Query                   string      `json:"query"`
-	Candidates              []Candidate `json:"candidates"`
-	SelectedChunkIDs        []string    `json:"selectedChunkIds,omitempty"`
-	EmbeddingMS             int64       `json:"embeddingMs"`
-	SearchMS                int64       `json:"searchMs"`
-	KeywordSearchMS         int64       `json:"keywordSearchMs"`
-	TotalMS                 int64       `json:"totalMs"`
-	Answer                  string      `json:"answer,omitempty"`
-	AnswerCorrect           *bool       `json:"answerCorrect,omitempty"`
-	Claims                  []Claim     `json:"claims,omitempty"`
-	CitedDocumentIDs        []string    `json:"citedDocumentIds,omitempty"`
-	GenerationMS            int64       `json:"generationMs,omitempty"`
-	RerankMS                int64       `json:"rerankMs"`
-	RerankEstimatedTokens   int64       `json:"rerankEstimatedTokens,omitempty"`
-	RerankInputTokens       *int64      `json:"rerankInputTokens,omitempty"`
-	RerankBilledSearchUnits *float64    `json:"rerankBilledSearchUnits,omitempty"`
+	RetrievalQuery          string                           `json:"retrievalQuery,omitempty"`
+	HistoryHash             string                           `json:"historyHash,omitempty"`
+	Rewrite                 *service.QueryRewriteObservation `json:"rewrite,omitempty"`
+	CaseID                  string                           `json:"caseId"`
+	Query                   string                           `json:"query"`
+	Candidates              []Candidate                      `json:"candidates"`
+	SelectedChunkIDs        []string                         `json:"selectedChunkIds,omitempty"`
+	EmbeddingMS             int64                            `json:"embeddingMs"`
+	SearchMS                int64                            `json:"searchMs"`
+	KeywordSearchMS         int64                            `json:"keywordSearchMs"`
+	TotalMS                 int64                            `json:"totalMs"`
+	Answer                  string                           `json:"answer,omitempty"`
+	AnswerCorrect           *bool                            `json:"answerCorrect,omitempty"`
+	Claims                  []Claim                          `json:"claims,omitempty"`
+	CitedDocumentIDs        []string                         `json:"citedDocumentIds,omitempty"`
+	GenerationMS            int64                            `json:"generationMs,omitempty"`
+	RerankMS                int64                            `json:"rerankMs"`
+	RerankEstimatedTokens   int64                            `json:"rerankEstimatedTokens,omitempty"`
+	RerankInputTokens       *int64                           `json:"rerankInputTokens,omitempty"`
+	RerankBilledSearchUnits *float64                         `json:"rerankBilledSearchUnits,omitempty"`
 }
 
 type CaseResult struct {
+	RetrievalQuery      string   `json:"retrievalQuery"`
+	RewriteStatus       string   `json:"rewriteStatus"`
+	RewriteMS           int64    `json:"rewriteMs"`
 	CaseID              string   `json:"caseId"`
 	CandidateChunkIDs   []string `json:"candidateChunkIds"`
 	SelectedChunkIDs    []string `json:"selectedChunkIds"`
@@ -146,30 +166,38 @@ type CaseResult struct {
 }
 
 type Summary struct {
-	Name                string       `json:"name"`
-	DatasetID           string       `json:"datasetId"`
-	CorpusFingerprint   string       `json:"corpusFingerprint"`
-	IndexFingerprint    string       `json:"indexFingerprint"`
-	Parameters          Parameters   `json:"parameters"`
-	CaseCount           int          `json:"caseCount"`
-	AnswerableCount     int          `json:"answerableCount"`
-	UnanswerableCount   int          `json:"unanswerableCount"`
-	NoEvidenceAccuracy  *float64     `json:"noEvidenceAccuracy,omitempty"`
-	GenerationGraded    int          `json:"generationGraded"`
-	CandidateRecall     float64      `json:"candidateRecall"`
-	RecallAtK           float64      `json:"recallAtK"`
-	MRRAtK              float64      `json:"mrrAtK"`
-	NDCGAtK             float64      `json:"ndcgAtK"`
-	Faithfulness        *float64     `json:"faithfulness,omitempty"`
-	CitationPrecision   *float64     `json:"citationPrecision,omitempty"`
-	CitationRecall      *float64     `json:"citationRecall,omitempty"`
-	AnswerAccuracy      *float64     `json:"answerAccuracy,omitempty"`
-	MeanEmbeddingMS     float64      `json:"meanEmbeddingMs"`
-	MeanSearchMS        float64      `json:"meanSearchMs"`
-	MeanKeywordSearchMS float64      `json:"meanKeywordSearchMs"`
-	MeanGenerationMS    *float64     `json:"meanGenerationMs,omitempty"`
-	MeanRerankMS        float64      `json:"meanRerankMs"`
-	Cases               []CaseResult `json:"cases"`
+	MeanRewriteMS             float64      `json:"meanRewriteMs"`
+	RewrittenCount            int          `json:"rewrittenCount"`
+	RewriteFallbackCount      int          `json:"rewriteFallbackCount"`
+	RewriteInputTokens        int64        `json:"rewriteInputTokens"`
+	RewriteOutputTokens       int64        `json:"rewriteOutputTokens"`
+	RewriteUsageReportedCases int          `json:"rewriteUsageReportedCases"`
+	RewriteCostNanoUSD        int64        `json:"rewriteCostNanoUsd"`
+	RewriteKnownCostCases     int          `json:"rewriteKnownCostCases"`
+	Name                      string       `json:"name"`
+	DatasetID                 string       `json:"datasetId"`
+	CorpusFingerprint         string       `json:"corpusFingerprint"`
+	IndexFingerprint          string       `json:"indexFingerprint"`
+	Parameters                Parameters   `json:"parameters"`
+	CaseCount                 int          `json:"caseCount"`
+	AnswerableCount           int          `json:"answerableCount"`
+	UnanswerableCount         int          `json:"unanswerableCount"`
+	NoEvidenceAccuracy        *float64     `json:"noEvidenceAccuracy,omitempty"`
+	GenerationGraded          int          `json:"generationGraded"`
+	CandidateRecall           float64      `json:"candidateRecall"`
+	RecallAtK                 float64      `json:"recallAtK"`
+	MRRAtK                    float64      `json:"mrrAtK"`
+	NDCGAtK                   float64      `json:"ndcgAtK"`
+	Faithfulness              *float64     `json:"faithfulness,omitempty"`
+	CitationPrecision         *float64     `json:"citationPrecision,omitempty"`
+	CitationRecall            *float64     `json:"citationRecall,omitempty"`
+	AnswerAccuracy            *float64     `json:"answerAccuracy,omitempty"`
+	MeanEmbeddingMS           float64      `json:"meanEmbeddingMs"`
+	MeanSearchMS              float64      `json:"meanSearchMs"`
+	MeanKeywordSearchMS       float64      `json:"meanKeywordSearchMs"`
+	MeanGenerationMS          *float64     `json:"meanGenerationMs,omitempty"`
+	MeanRerankMS              float64      `json:"meanRerankMs"`
+	Cases                     []CaseResult `json:"cases"`
 }
 
 func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
@@ -217,6 +245,22 @@ func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
 		summary.MeanSearchMS += float64(result.SearchMS)
 		summary.MeanKeywordSearchMS += float64(result.KeywordSearchMS)
 		summary.MeanRerankMS += float64(result.RerankMS)
+		summary.MeanRewriteMS += float64(result.RewriteMS)
+		if result.RewriteStatus == "rewritten" {
+			summary.RewrittenCount++
+		}
+		if result.RewriteStatus == "fallback" {
+			summary.RewriteFallbackCount++
+		}
+		if observed.Rewrite != nil && observed.Rewrite.UsageReported {
+			summary.RewriteUsageReportedCases++
+			summary.RewriteInputTokens += observed.Rewrite.InputTokens
+			summary.RewriteOutputTokens += observed.Rewrite.OutputTokens
+			if observed.Rewrite.CostKnown {
+				summary.RewriteKnownCostCases++
+				summary.RewriteCostNanoUSD += observed.Rewrite.CostNanoUSD
+			}
+		}
 		if result.Faithfulness != nil {
 			summary.GenerationGraded++
 			faith += *result.Faithfulness
@@ -243,6 +287,7 @@ func Evaluate(dataset Dataset, snapshot Snapshot) (Summary, error) {
 	summary.MeanSearchMS /= n
 	summary.MeanKeywordSearchMS /= n
 	summary.MeanRerankMS /= n
+	summary.MeanRewriteMS /= n
 	if summary.GenerationGraded > 0 {
 		g := float64(summary.GenerationGraded)
 		summary.Faithfulness = ptr(faith / g)
@@ -264,6 +309,11 @@ func ValidateDataset(dataset Dataset) error {
 			return fmt.Errorf("invalid or duplicate evaluation case %q", item.ID)
 		}
 		seen[item.ID] = true
+		for _, turn := range item.History {
+			if (turn.Role != "user" && turn.Role != "assistant") || strings.TrimSpace(turn.Content) == "" {
+				return fmt.Errorf("case %q has invalid rewrite history", item.ID)
+			}
+		}
 		for doc, grade := range item.RelevantDocuments {
 			if doc == "" || grade < 1 || grade > 3 {
 				return fmt.Errorf("case %q has invalid relevance grade", item.ID)
@@ -292,6 +342,11 @@ func ValidateSnapshot(dataset Dataset, snapshot Snapshot) error {
 	if p.RerankEnabled && (p.RerankProvider == "" || p.RerankModel == "" || p.RerankTokenizer == "" || p.RerankMaxDocuments <= 0 || p.RerankMaxDocuments > 400 || p.RerankMaxPairTokens <= 0 || p.RerankMaxTotalTokens <= 0) {
 		return fmt.Errorf("reranked snapshot must record model and admission limits")
 	}
+	if rewrite := p.QueryRewrite; rewrite != nil {
+		if rewrite.Provider == "" || rewrite.Model == "" || rewrite.PromptVersion == "" || rewrite.MaxHistoryMessages <= 0 || rewrite.MaxHistoryMessages > 50 || rewrite.MaxHistoryChars <= 0 || rewrite.MaxHistoryChars > 50000 || rewrite.MaxInputTokens <= 0 || rewrite.MaxOutputTokens <= 0 || rewrite.TimeoutMS <= 0 {
+			return fmt.Errorf("query rewrite snapshot must record model, prompt and limits")
+		}
+	}
 	if p.CandidateLimit <= 0 || p.CandidateLimit > 200 || p.TopK <= 0 || p.TopK > p.CandidateLimit || p.ContextTokenBudget <= 0 || math.IsNaN(p.SimilarityThreshold) || math.IsInf(p.SimilarityThreshold, 0) || p.SimilarityThreshold < 0 || p.SimilarityThreshold > 1 || p.ChunkTargetTokens <= 0 || p.ChunkOverlapTokens < 0 || p.ChunkOverlapTokens >= p.ChunkTargetTokens || p.PromptVersion == "" || p.RetrievalMode == "" || p.EmbeddingProvider == "" || p.EmbeddingModel == "" || p.EmbeddingDimension <= 0 || p.EmbeddingTokenizer == "" {
 		return fmt.Errorf("snapshot %q has invalid experiment parameters", snapshot.Name)
 	}
@@ -317,6 +372,9 @@ func ValidateSnapshot(dataset Dataset, snapshot Snapshot) error {
 			return fmt.Errorf("snapshot %q has invalid case %q", snapshot.Name, item.CaseID)
 		}
 		seen[item.CaseID] = true
+		if err := validateRewriteObservation(original, item, p.QueryRewrite); err != nil {
+			return fmt.Errorf("case %q: %w", item.CaseID, err)
+		}
 		if item.EmbeddingMS < 0 || item.SearchMS < 0 || item.KeywordSearchMS < 0 || item.TotalMS < 0 || item.GenerationMS < 0 {
 			return fmt.Errorf("case %q has negative latency", item.CaseID)
 		}
@@ -434,7 +492,13 @@ func evaluateCase(gold Case, observed Observation, p Parameters, estimator embed
 	if err != nil {
 		return CaseResult{}, err
 	}
-	result := CaseResult{CaseID: gold.ID, CandidateChunkIDs: allChunkIDs, EmbeddingMS: observed.EmbeddingMS, SearchMS: observed.SearchMS, KeywordSearchMS: observed.KeywordSearchMS, GenerationMS: observed.GenerationMS, RerankMS: observed.RerankMS}
+	result := CaseResult{CaseID: gold.ID, CandidateChunkIDs: allChunkIDs, EmbeddingMS: observed.EmbeddingMS, SearchMS: observed.SearchMS, KeywordSearchMS: observed.KeywordSearchMS, GenerationMS: observed.GenerationMS, RerankMS: observed.RerankMS, RetrievalQuery: observed.RetrievalQuery, RewriteStatus: "disabled"}
+	if result.RetrievalQuery == "" {
+		result.RetrievalQuery = observed.Query
+	}
+	if observed.Rewrite != nil {
+		result.RewriteMS, result.RewriteStatus = observed.Rewrite.LatencyMS, observed.Rewrite.Status
+	}
 	selectedDocs := make(map[string]bool)
 	for _, match := range selected.Matches {
 		result.SelectedChunkIDs = append(result.SelectedChunkIDs, match.ChunkID)

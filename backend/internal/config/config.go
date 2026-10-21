@@ -176,6 +176,7 @@ type Config struct {
 	Embedding                   EmbeddingConfig
 	Knowledge                   KnowledgeConfig
 	Rerank                      RerankConfig
+	QueryRewrite                QueryRewriteConfig
 	Providers                   []ProviderConfig
 }
 
@@ -408,6 +409,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	queryRewrite, err := loadQueryRewriteConfig()
+	if err != nil {
+		return Config{}, err
+	}
 	quotaEnabled, err := boolEnv("QUOTA_ENABLED", true)
 	if err != nil {
 		return Config{}, err
@@ -566,6 +571,7 @@ func Load() (Config, error) {
 		Embedding:                   embedding,
 		Knowledge:                   knowledge,
 		Rerank:                      rerank,
+		QueryRewrite:                queryRewrite,
 		Providers:                   providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
@@ -595,6 +601,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if err := validateOptionalModelTarget("TITLE_GENERATION", cfg.TitleGenerationProvider, cfg.TitleGenerationModel, cfg.Providers); err != nil {
+		return Config{}, err
+	}
+	if err := validateOptionalModelTarget("RAG_QUERY_REWRITE", cfg.QueryRewrite.Provider, cfg.QueryRewrite.Model, cfg.Providers); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

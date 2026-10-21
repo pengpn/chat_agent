@@ -248,7 +248,7 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	}
 	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + preparedAttachments.DocumentText, Parts: preparedAttachments.Parts})
 	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
-	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, input.KnowledgeBaseIDs, &request); err != nil {
+	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, input.KnowledgeBaseIDs, selectedBranch(history), &request); err != nil {
 		s.gateway.Abandon(operationID)
 		return nil, err
 	}
@@ -428,7 +428,7 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 	}
 	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content + regeneratedAttachments.DocumentText, Parts: regeneratedAttachments.Parts})
 	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
-	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, []string(session.UserMessage.KnowledgeBaseIDs), &request); err != nil {
+	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, []string(session.UserMessage.KnowledgeBaseIDs), ancestryBefore(history, history[userIndex]), &request); err != nil {
 		s.gateway.Abandon(operationID)
 		return nil, err
 	}
@@ -579,7 +579,7 @@ func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, t
 	}
 	requestMessages = append(requestMessages, provider.Message{Role: "user", Content: session.UserMessage.Content})
 	request := provider.ChatRequest{Model: input.Model, Messages: requestMessages, Temperature: input.Temperature, ResponseFormat: responseFormat}
-	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, knowledgeBaseIDs, &request); err != nil {
+	if err := s.applyGrounding(ctx, session, session.UserMessage.Content, knowledgeBaseIDs, ancestryBefore(history, target), &request); err != nil {
 		s.gateway.Abandon(operationID)
 		return nil, err
 	}

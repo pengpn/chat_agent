@@ -6,3 +6,4 @@ backend/**/__debug_bin*
 frontend/node_modules
 frontend/dist
 coverage/
+backend/eval/rag/private/

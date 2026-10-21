@@ -22,6 +22,7 @@ type fakeEmbeddingGateway struct {
 	mu         sync.Mutex
 	calls      int
 	queryCalls int
+	queryText  string
 }
 
 func (f *fakeEmbeddingGateway) EmbedDocuments(_ context.Context, request embeddinggateway.Request) (embeddinggateway.Result, error) {
@@ -35,9 +36,10 @@ func (f *fakeEmbeddingGateway) EmbedDocuments(_ context.Context, request embeddi
 	return embeddinggateway.Result{Provider: "test", Model: "embedding-v1", Dimension: 3, Vectors: vectors}, nil
 }
 
-func (f *fakeEmbeddingGateway) EmbedQuery(context.Context, embeddinggateway.Request) (embeddinggateway.Result, error) {
+func (f *fakeEmbeddingGateway) EmbedQuery(_ context.Context, request embeddinggateway.Request) (embeddinggateway.Result, error) {
 	f.mu.Lock()
 	f.queryCalls++
+	f.queryText = request.Texts[0]
 	f.mu.Unlock()
 	return embeddinggateway.Result{
 		Provider: "test", Model: "embedding-v1", Dimension: 3,
@@ -54,6 +56,7 @@ type fakeKnowledgeRepository struct {
 	searchRows   []repository.KnowledgeSearchRow
 	keywordRows  []repository.KnowledgeSearchRow
 	keywordCalls int
+	keywordQuery string
 	lastSearch   struct {
 		provider  string
 		model     string
@@ -250,10 +253,11 @@ func (r *fakeKnowledgeRepository) SearchChunksExact(_ context.Context, userID st
 	return append([]repository.KnowledgeSearchRow(nil), r.searchRows[:end]...), nil
 }
 
-func (r *fakeKnowledgeRepository) SearchChunksKeyword(_ context.Context, userID string, baseIDs []string, _ string, _ string, _ int, limit int, _ string, _ pgvector.Vector) ([]repository.KnowledgeSearchRow, error) {
+func (r *fakeKnowledgeRepository) SearchChunksKeyword(_ context.Context, userID string, baseIDs []string, _ string, _ string, _ int, limit int, query string, _ pgvector.Vector) ([]repository.KnowledgeSearchRow, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.keywordCalls++
+	r.keywordQuery = query
 	if userID != r.base.UserID || len(baseIDs) != 1 || baseIDs[0] != r.base.ID {
 		return []repository.KnowledgeSearchRow{}, nil
 	}
