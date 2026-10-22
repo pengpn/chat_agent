@@ -221,6 +221,7 @@ export type StreamHandlers = {
 
 export type UserEventHandlers = {
   onConversationTitleUpdated: (conversation: Conversation) => void
+  onAgentStateChanged?: (conversationID: string) => void
   onReset: () => void | Promise<void>
 }
 
@@ -287,8 +288,33 @@ async function consumeUserEventStream(response: Response, handlers: UserEventHan
 			if (event === 'conversation.title.updated' && data.conversation) {
 				handlers.onConversationTitleUpdated(data.conversation)
 			}
+			if (event === 'agent.state.changed' && typeof data.conversationId === 'string') {
+				handlers.onAgentStateChanged?.(data.conversationId)
+			}
 		}
 	}
+}
+
+export type ToolInteraction = {
+  id: string
+  kind: 'question' | 'approval'
+  expiresAt: string
+  request: { question?: string; options?: string[]; tool?: string; reason?: string; arguments?: unknown; descriptor?: { namespace: string; name: string; version: string } }
+}
+export type AgentArtifact = { id: string; title: string; mediaType: string; size: number; sha256: string; content?: string }
+export type AgentToolState = {
+  plan: { revision: number; steps: { title: string; status: 'pending' | 'in_progress' | 'completed' }[] } | null
+  interactions: ToolInteraction[]
+  artifacts: AgentArtifact[]
+}
+export function getAgentToolState(conversationID: string, signal?: AbortSignal): Promise<AgentToolState> {
+  return request(`/api/v1/conversations/${conversationID}/agent-state`, { signal })
+}
+export function respondToolInteraction(conversationID: string, id: string, response: { answer?: string; approved?: boolean }): Promise<unknown> {
+  return request(`/api/v1/conversations/${conversationID}/tool-interactions/${id}/respond`, { method: 'POST', body: JSON.stringify(response) })
+}
+export function readAgentArtifact(conversationID: string, id: string): Promise<AgentArtifact> {
+  return request(`/api/v1/conversations/${conversationID}/artifacts/${id}`)
 }
 
 export async function streamMessage(

@@ -177,6 +177,8 @@ type Config struct {
 	Knowledge                   KnowledgeConfig
 	Rerank                      RerankConfig
 	QueryRewrite                QueryRewriteConfig
+	Execution                   ExecutionConfig
+	AgentTools                  AgentToolsConfig
 	Providers                   []ProviderConfig
 }
 
@@ -252,7 +254,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse DATABASE_CONN_MAX_IDLE_TIME: %w", err)
 	}
-	maxToolIterations, err := positiveIntEnv("MAX_TOOL_ITERATIONS", 4)
+	maxToolIterations, err := positiveIntEnv("MAX_TOOL_ITERATIONS", 8)
 	if err != nil {
 		return Config{}, err
 	}
@@ -410,6 +412,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	queryRewrite, err := loadQueryRewriteConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	execution, err := loadExecutionConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	agentTools, err := loadAgentToolsConfig()
 	if err != nil {
 		return Config{}, err
 	}
@@ -572,10 +582,16 @@ func Load() (Config, error) {
 		Knowledge:                   knowledge,
 		Rerank:                      rerank,
 		QueryRewrite:                queryRewrite,
+		Execution:                   execution,
+		AgentTools:                  agentTools,
 		Providers:                   providers,
 	}
 	if len(cfg.JWTSecret) < 32 {
 		return Config{}, fmt.Errorf("JWT_SECRET must contain at least 32 characters")
+	}
+	// JSON 转义最多放大约六倍，另为路径等元数据预留 8 KiB，禁止截断结构化结果。
+	if cfg.Execution.Enabled && (cfg.ToolResultMaxBytes <= 8192 || cfg.Execution.MaxOutputBytes > (cfg.ToolResultMaxBytes-8192)/6) {
+		return Config{}, fmt.Errorf("EXECUTION_MAX_OUTPUT_BYTES 过大，请增加 TOOL_RESULT_MAX_BYTES 或降低输出上限")
 	}
 	if cfg.RefreshTokenTTL <= cfg.AccessTokenTTL {
 		return Config{}, fmt.Errorf("REFRESH_TOKEN_TTL must be longer than ACCESS_TOKEN_TTL")

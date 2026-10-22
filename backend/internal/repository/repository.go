@@ -46,6 +46,7 @@ type Repositories struct {
 	Attachments   AttachmentRepository
 	Quotas        QuotaRepository
 	Knowledge     KnowledgeRepository
+	AgentTools    AgentToolRepository
 }
 
 // ChatRepository groups the persistence operations required for a conversation
@@ -71,6 +72,7 @@ func New(db *gorm.DB) *Repositories {
 		Attachments:   newAttachmentRepository(db),
 		Quotas:        newQuotaRepository(db),
 		Knowledge:     newKnowledgeRepository(db),
+		AgentTools:    newAgentToolRepository(db),
 	}
 }
 
@@ -191,6 +193,9 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 		&model.KnowledgeChunk{},
 		&model.MessageCitation{},
 		&model.KnowledgeObjectCleanup{},
+		&model.AgentPlan{},
+		&model.ToolInteraction{},
+		&model.AgentArtifact{},
 	); err != nil {
 		return err
 	}

@@ -38,6 +38,7 @@ const accountAction = ref<'verify' | 'reset' | null>(initialVerifyToken ? 'verif
 const accountToken = ref(initialVerifyToken ?? initialResetToken ?? '')
 const user = ref<User | null>(initialSession?.user ?? null)
 const accountOpen = ref(false)
+const agentRevision = ref(0)
 const conversations = ref<Conversation[]>([])
 const conversationCursor = ref('')
 const conversationsHaveMore = ref(false)
@@ -464,6 +465,7 @@ function startUserEvents() {
 	const controller = new AbortController()
 	userEventsController = controller
 	void subscribeUserEvents({
+		onAgentStateChanged() { agentRevision.value++ },
 		onConversationTitleUpdated(conversation) {
 			if (activeID.value === conversation.id) activeConversationSnapshot.value = conversation
 			if (conversationSearch.value) {
@@ -577,6 +579,7 @@ function messageFor(cause: unknown) { return cause instanceof Error ? cause.mess
       :loading-messages="messagesLoading"
       :knowledge-bases="knowledgeBases"
       :knowledge-error="knowledgeError"
+      :agent-revision="agentRevision"
       @send="send"
 	  @regenerate="regenerate"
 	  @edit-message="editMessage"

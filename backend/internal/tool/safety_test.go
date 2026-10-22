@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -20,7 +21,7 @@ type scriptedTool struct {
 }
 
 func (s *scriptedTool) Definition() provider.ToolDefinition {
-	return provider.ToolDefinition{Function: provider.ToolFunctionDefinition{Name: s.name, Description: "test tool"}}
+	return provider.ToolDefinition{Type: "function", Function: provider.ToolFunctionDefinition{Name: s.name, Description: "test tool", Parameters: json.RawMessage(`{"type":"object"}`)}}
 }
 
 func (s *scriptedTool) Execute(ctx context.Context, arguments string) (string, error) {
@@ -51,13 +52,13 @@ func TestRegistryRejectsOversizedArguments(t *testing.T) {
 	}
 }
 
-func TestRegistryTruncatesOversizedResult(t *testing.T) {
+func TestRegistryRejectsOversizedResultWithoutBreakingJSON(t *testing.T) {
 	item := &scriptedTool{name: "demo", result: strings.Repeat("b", 64)}
 	registry := NewRegistry(item)
 	registry.Configure(SafetyConfig{MaxResultBytes: 16})
 
 	result, err := registry.ExecuteForUser(context.Background(), "user-1", callFor("demo", "{}"))
-	if err != nil || len(result) != 16 {
+	if err == nil || result != "" {
 		t.Fatalf("result length = %d, err = %v", len(result), err)
 	}
 }

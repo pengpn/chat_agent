@@ -7,3 +7,5 @@ frontend/node_modules
 frontend/dist
 coverage/
 backend/eval/rag/private/
+backend/data/tool-workspaces/
+data/tool-workspaces/

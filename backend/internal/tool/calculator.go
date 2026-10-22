@@ -13,8 +13,18 @@ import (
 )
 
 type calculator struct{}
+type calculatorInput struct {
+	Expression string `json:"expression"`
+}
+type calculatorResult struct {
+	Result float64 `json:"result"`
+}
 
 func NewCalculator() Tool { return calculator{} }
+
+func (calculator) Metadata() Metadata {
+	return Metadata{Namespace: "math", Name: "calculate", Version: "1.0.0", Category: "calculation", Source: "builtin", Exposure: "model", WireName: "calculator", Capabilities: []string{"compute"}}
+}
 
 func (calculator) Definition() provider.ToolDefinition {
 	return provider.ToolDefinition{
@@ -23,41 +33,29 @@ func (calculator) Definition() provider.ToolDefinition {
 			Name:        "calculator",
 			Description: "Evaluate a basic arithmetic expression. Use it for calculations instead of mental arithmetic.",
 			// 工具参数json schema，约束“模型怎样调用后端工具”
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"expression":{"type":"string","description":"Arithmetic using numbers, +, -, *, /, and parentheses."}},"required":["expression"],"additionalProperties":false}`),
+			Parameters: json.RawMessage(`{"type":"object","properties":{"expression":{"type":"string","description":"Arithmetic using numbers, +, -, *, /, and parentheses."}},"required":["expression"],"additionalProperties":false}`),
 		},
 	}
 }
 
 func (calculator) Execute(ctx context.Context, rawArguments string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
 	if len(rawArguments) == 0 || len(rawArguments) > 4<<10 {
 		return "", fmt.Errorf("calculator arguments must contain 1 to 4096 bytes")
 	}
-	var input struct {
-		Expression string `json:"expression"`
-	}
-	decoder := json.NewDecoder(strings.NewReader(rawArguments))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		return "", fmt.Errorf("calculator arguments must contain expression: %w", err)
-	}
-	input.Expression = strings.TrimSpace(input.Expression)
-	if input.Expression == "" || len([]rune(input.Expression)) > 256 {
-		return "", fmt.Errorf("calculator expression must contain 1 to 256 characters")
-	}
-	result, err := parseExpression(input.Expression)
-	if err != nil {
-		return "", err
-	}
-	if math.IsNaN(result) || math.IsInf(result, 0) {
-		return "", fmt.Errorf("calculator result is not finite")
-	}
-	output, _ := json.Marshal(struct {
-		Result float64 `json:"result"`
-	}{Result: result})
-	return string(output), nil
+	return executeTyped(ctx, rawArguments, func(_ context.Context, input calculatorInput) (calculatorResult, error) {
+		input.Expression = strings.TrimSpace(input.Expression)
+		if input.Expression == "" || len([]rune(input.Expression)) > 256 {
+			return calculatorResult{}, fmt.Errorf("calculator expression must contain 1 to 256 characters")
+		}
+		result, err := parseExpression(input.Expression)
+		if err != nil {
+			return calculatorResult{}, err
+		}
+		if math.IsNaN(result) || math.IsInf(result, 0) {
+			return calculatorResult{}, fmt.Errorf("calculator result is not finite")
+		}
+		return calculatorResult{Result: result}, nil
+	})
 }
 
 type expressionParser struct {

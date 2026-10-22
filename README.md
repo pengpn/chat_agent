@@ -6,6 +6,7 @@
 
 学习文档：
 
+- [Tool 学习指南：原理、加载、新增工具与完整调用流程](./docs/Tool学习指南.md)
 - [上下文 Token 管理实现解析](./docs/context-token-management.md)
 - [重新生成回答实现解析](./docs/regenerate-answer.md)
 - [编辑消息与对话分支实现解析](./docs/message-editing-and-conversation-branches.md)
@@ -24,6 +25,10 @@
 - [RAG 第八阶段：关键词召回与 RRF 混合检索](./docs/rag-08-hybrid-retrieval-and-rrf.md)
 - [RAG 第九阶段：Reranker 网关与评估](./docs/rag-09-reranker-gateway-and-evaluation.md)
 - [RAG 第十阶段：查询改写与多轮检索评估](./docs/rag-10-query-rewriting.md)
+- [执行工具第一阶段：会话沙箱、文件操作与 Shell](./docs/execution-01-sandbox-and-tools.md)
+- [执行工具第二阶段：统一 Registry 与 12 个 MVP 工具](./docs/execution-02-tool-registry-and-mvp.md)
+- [执行工具第三课：统一工具适配器与类型化业务服务](./docs/execution-03-typed-tools-and-services.md)
+- [工具审批交互：动态倒计时、临时反馈与请求竞态](./docs/tool-approval-countdown-and-feedback.md)
 - [前端设计系统](./design-system/agent-workspace/MASTER.md)
 - [前端组件规范](./design-system/agent-workspace/COMPONENTS.md)
 
@@ -39,6 +44,8 @@
 - Anthropic Messages API 原生 `Chat` / `ChatStream` 适配器
 - 可选主动思考：通过 `ENABLE_THINKING=true` 让受支持的模型返回推理摘要
 - OpenAI-compatible function calling：模型可请求服务端白名单工具，当前内置安全算术 `calculator`
+- 可选基础执行工具：会话隔离的文件列表、读取、写入、增量修改、搜索和受限 Docker Shell，默认关闭且仅管理员可用
+- 统一工具注册表：分类/来源/版本元数据、本轮 Schema 与执行器快照、一次性 Shell 审批；支持计划、真实用户答复、持久化文本产物和可选 Tavily 搜索
 - 通过环境变量启用模型；前端只看到已配置密钥的模型，密钥永不离开后端
 - Zap JSON 结构化日志、全链路 `X-Request-ID`，以及每次模型调用的 token/成本记录
 - Zap 日志同时输出到 stdout 与按日期轮转的本地 JSON 日志文件
@@ -63,7 +70,7 @@
 
 ## 快速启动
 
-需要 Go 1.23+、Node.js 20+、Docker。PostgreSQL 使用 `pgvector/pgvector:0.8.6-pg16`，在 PostgreSQL 16 基础上预装 vector 扩展。
+需要 Go 1.24+、Node.js 20+、Docker。PostgreSQL 使用 `pgvector/pgvector:0.8.6-pg16`，在 PostgreSQL 16 基础上预装 vector 扩展。
 
 ```bash
 cp .env.example .env
@@ -113,6 +120,7 @@ backend/
   internal/objectstore/       # S3/MinIO 对象存储接口和实现
   internal/provider/          # 供应商协议适配器（仅由 LLMGateway 调用）
   internal/tool/              # 服务端工具定义、白名单与执行实现
+  internal/execution/         # 会话工作区、文件快照和受限 Docker 执行网关
 frontend/src/                 # Vue 3 对话 UI
 ```
 
@@ -324,7 +332,11 @@ THINKING_BUDGET_TOKENS=2048
 
 OpenAI-compatible Provider（OpenAI、Kimi、DeepSeek、GLM）在每次请求中携带已注册工具的 JSON Schema，并使用 `tool_choice: auto`。当模型流式返回 `tool_calls` 时，后端会完整拼接分片参数、校验工具白名单、在服务端执行工具，再将结果作为 `role: "tool"` 消息回传给模型，直到得到最终回答。
 
-当前默认注册 `calculator`，只支持数字、`+`、`-`、`*`、`/` 与括号，不会执行任意代码、Shell 命令或网络请求。新增工具只需在 `internal/tool` 实现 `Tool` 接口，并加入 `tool.NewDefaultRegistry`。
+默认只注册 `calculator`，它不执行代码或网络请求。`EXECUTION_ENABLED=true` 时额外注册六个会话沙箱工具，默认仅管理员可见；`EXECUTION_ADMIN_ONLY=false` 才对普通登录用户开放。模型中的工具名使用 `shell_exec`、`file_list`、`file_read`、`file_write`、`file_apply_patch`、`file_search`。它们操作独立工作区，不操作本项目源码或用户指定的本地项目。
+
+先构建镜像：`docker build -f backend/sandbox/Dockerfile -t chat-agent-sandbox:local backend/sandbox`，再启用配置并重启后端。Shell 默认禁网、非 root、只读根目录、无宿主挂载，工作区通过受限归档复制进出有容量上限的 tmpfs。执行前还需由真实用户在网页批准完整命令参数，一次性票据不能跨任务/版本复用。详细边界见[第一课](./docs/execution-01-sandbox-and-tools.md)与[第二课](./docs/execution-02-tool-registry-and-mvp.md)。当前仍不包含交互式进程、`file.diff` 和文件浏览器，也不是面向不可信公网租户的完整隔离平台。
+
+计划、提问和文本产物工具默认可用；网页在对话区域显示待处理交互、计划和最近产物。联网检索需配置 `WEB_SEARCH_ENABLED=true` 与 `WEB_SEARCH_API_KEY` 后重启，使用 Tavily basic 检索，搜索费用不计入 LLM Token 用量记录。
 
 `MAX_TOOL_ITERATIONS` 默认是 `4`，最多允许同一用户轮次内执行四轮工具调用；上限为 `10`，防止模型异常循环。工具调用的中间协议消息仅在当前模型轮次内保留，最终用户消息与 AI 最终回答仍会持久化到 PostgreSQL；后续可在审计/Trace 功能中扩展为完整工具调用记录。
 

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/alerting"
 	"github.com/example/agent-platform/backend/internal/database/model"
 	"github.com/example/agent-platform/backend/internal/domain"
+	"github.com/example/agent-platform/backend/internal/execution"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
 	"github.com/example/agent-platform/backend/internal/moderation"
@@ -81,6 +83,7 @@ type ChatSession struct {
 	ContextIsExplicitPath    bool
 	RegeneratedFromMessageID string
 	request                  provider.ChatRequest
+	toolSet                  *tool.ToolSet
 	preparationUsage         provider.TokenUsage
 	preparationUsageReported bool
 	preparationCostNanoUSD   int64
@@ -278,7 +281,8 @@ func (s *ChatService) Prepare(ctx context.Context, userID, conversationID string
 	session.UserMessage.Attachments = preparedAttachments.Items
 
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
-		request.Tools = s.tools.Definitions()
+		session.toolSet = s.tools.SnapshotForUser(ctx, userID)
+		request.Tools = session.toolSet.Definitions()
 	}
 	if s.thinking != nil && s.thinking.Enabled && s.gateway.SupportsThinking(input.Provider, input.Model) {
 		thinking := *s.thinking
@@ -444,7 +448,8 @@ func (s *ChatService) PrepareRegeneration(ctx context.Context, userID, conversat
 	}
 
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
-		request.Tools = s.tools.Definitions()
+		session.toolSet = s.tools.SnapshotForUser(ctx, userID)
+		request.Tools = session.toolSet.Definitions()
 	}
 	if s.thinking != nil && s.thinking.Enabled && s.gateway.SupportsThinking(input.Provider, input.Model) {
 		thinking := *s.thinking
@@ -595,7 +600,8 @@ func (s *ChatService) PrepareEdit(ctx context.Context, userID, conversationID, t
 	}
 
 	if s.gateway.SupportsTools(input.Provider) && s.tools != nil {
-		request.Tools = s.tools.Definitions()
+		session.toolSet = s.tools.SnapshotForUser(ctx, userID)
+		request.Tools = session.toolSet.Definitions()
 	}
 	if s.thinking != nil && s.thinking.Enabled && s.gateway.SupportsThinking(input.Provider, input.Model) {
 		thinking := *s.thinking
@@ -728,7 +734,7 @@ func (s *ChatService) Stream(ctx context.Context, session *ChatSession, onEvent 
 		toolCalls++
 		// 执行本轮模型请求的工具：把 assistant（含 tool_calls）和各 tool 结果追加进 messages，
 		// 供下一轮 ChatStream 继续对话。
-		messages = s.executeToolCalls(streamCtx, session.UserID, messages, turn.answer, turn.think, turn.toolCalls)
+		messages = s.executeToolCalls(streamCtx, session, messages, turn.answer, turn.think, turn.toolCalls)
 	}
 	if ctx.Err() != nil {
 		status = "stopped"
@@ -929,7 +935,7 @@ func (s *ChatService) Chat(ctx context.Context, session *ChatSession) (model.Mes
 			break
 		}
 		toolCalls++
-		messages = s.executeToolCalls(ctx, session.UserID, messages, result.Content, result.Think, result.ToolCalls)
+		messages = s.executeToolCalls(ctx, session, messages, result.Content, result.Think, result.ToolCalls)
 	}
 	if ctx.Err() != nil {
 		status = "stopped"
@@ -1005,7 +1011,11 @@ func (s *ChatService) finalize(messageID string, completion model.MessageComplet
 	return s.repository.Finalize(ctx, messageID, completion)
 }
 
-func (s *ChatService) executeToolCalls(ctx context.Context, userID string, messages []provider.Message, assistantContent, assistantThink string, calls []provider.ToolCall) []provider.Message {
+func (s *ChatService) executeToolCalls(ctx context.Context, session *ChatSession, messages []provider.Message, assistantContent, assistantThink string, calls []provider.ToolCall) []provider.Message {
+	// 加上已落库的 assistant ID：没有幂等头时仍有唯一任务身份；
+	// 进程重启后即使客户端复用幂等键，新消息也不能复用旧审批。
+	toolOperationID := fmt.Sprintf("%x", sha256.Sum256([]byte(session.OperationID+":"+session.AssistantMessage.ID)))
+	ctx = execution.WithScope(ctx, execution.Scope{UserID: session.UserID, ConversationID: session.UserMessage.ConversationID, OperationID: toolOperationID})
 	messages = append(messages, provider.Message{Role: "assistant", Content: assistantContent, ReasoningContent: assistantThink, ToolCalls: calls})
 	// 循环执行工具调用：把 tool 执行结果追加进 messages，供下一轮 ChatStream 继续对话。
 	for _, call := range calls {
@@ -1016,7 +1026,13 @@ func (s *ChatService) executeToolCalls(ctx context.Context, userID string, messa
 			logger.String("tool_call_id", call.ID),
 			logger.String("tool_name", call.Function.Name),
 		)
-		content, err := s.tools.ExecuteForUser(ctx, userID, call)
+		var content string
+		var err error
+		if session.toolSet == nil {
+			err = fmt.Errorf("本轮未启用工具")
+		} else {
+			content, err = session.toolSet.Execute(ctx, session.UserID, call)
+		}
 		if err != nil {
 			logger.Warn(ctx, "tool execution failed",
 				logger.String("tool_call_id", call.ID),

@@ -20,7 +20,16 @@ type Handler struct {
 	admin         *service.AdminService
 	knowledge     *service.KnowledgeService
 	retrieval     *service.KnowledgeRetrievalService
+	toolState     *service.ToolStateService
+	interactions  *service.InteractionService
+	artifacts     *service.ArtifactService
 	refreshCookie AuthCookieConfig
+}
+
+func (h *Handler) ConfigureToolServices(state *service.ToolStateService, interactions *service.InteractionService, artifacts *service.ArtifactService) {
+	h.toolState = state
+	h.interactions = interactions
+	h.artifacts = artifacts
 }
 
 func (h *Handler) ConfigureKnowledge(service *service.KnowledgeService) {

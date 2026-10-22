@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CitationPanel from '@/components/CitationPanel.vue'
+import AgentToolsPanel from '@/components/AgentToolsPanel.vue'
 import MarkdownContent from '@/components/MarkdownContent.vue'
 import { deleteAttachment, downloadAttachment, downloadKnowledgeDocument, retryAttachment, uploadAttachment } from '@/lib/api'
 import { shouldSendComposerMessage } from '@/lib/composer-keyboard'
@@ -21,6 +22,7 @@ const props = defineProps<{
   loadingMessages: boolean
   knowledgeBases: KnowledgeBase[]
   knowledgeError: string
+  agentRevision: number
 }>()
 
 const emit = defineEmits<{
@@ -106,6 +108,13 @@ function onViewportScroll() {
   if (!element) return
   followLatestMessage.value = isNearScrollBottom(element)
   if (element.scrollTop <= 80) requestOlderMessages()
+}
+
+async function followToolUpdate() {
+  if (!followLatestMessage.value) return
+  await nextTick()
+  const element = viewport.value
+  element?.scrollTo({ top: element.scrollHeight, behavior: 'auto' })
 }
 
 function toggleModelPicker() {
@@ -416,6 +425,7 @@ function openAttachment(message: Message, item: Attachment) { void downloadAttac
         </div>
 		</template>
       </article>
+      <AgentToolsPanel v-if="conversation" :conversation-i-d="conversation.id" :revision="agentRevision" :pending="pending" @changed="followToolUpdate" />
     </div>
 
     <footer class="composer-wrap">

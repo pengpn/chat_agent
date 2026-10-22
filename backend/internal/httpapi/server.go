@@ -8,6 +8,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/auth"
 	"github.com/example/agent-platform/backend/internal/config"
 	"github.com/example/agent-platform/backend/internal/embeddinggateway"
+	"github.com/example/agent-platform/backend/internal/execution"
 	"github.com/example/agent-platform/backend/internal/httpapi/handler"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/mailer"
@@ -22,6 +23,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/streamcache"
 	"github.com/example/agent-platform/backend/internal/tool"
 	"github.com/example/agent-platform/backend/internal/userevent"
+	"github.com/example/agent-platform/backend/internal/websearch"
 )
 
 // Server 管理 HTTP 层依赖，路由组装位于 router.go。
@@ -64,6 +66,11 @@ func NewServerWithEmbeddingGateway(repositories *repository.Repositories, jwtMan
 
 // NewServerWithRAGGateways 在应用入口注入 RAG 模型网关，业务层不组装供应商客户端。
 func NewServerWithRAGGateways(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, llmLimiter llmgateway.RateLimiter, authLimiter ratelimit.Limiter, store objectstore.Store, emailSender mailer.Sender, embeddings embeddinggateway.Gateway, reranker rerankgateway.Gateway, cfg config.Config) *Server {
+	return NewServerWithExecutionGateway(repositories, jwtManager, providers, llmLimiter, authLimiter, store, emailSender, embeddings, reranker, nil, cfg)
+}
+
+// NewServerWithExecutionGateway 由入口注入执行网关，HTTP 层不创建目录或启动 Docker。
+func NewServerWithExecutionGateway(repositories *repository.Repositories, jwtManager *auth.JWTManager, providers *provider.Registry, llmLimiter llmgateway.RateLimiter, authLimiter ratelimit.Limiter, store objectstore.Store, emailSender mailer.Sender, embeddings embeddinggateway.Gateway, reranker rerankgateway.Gateway, executor *execution.Gateway, cfg config.Config) *Server {
 	streams := streamcache.New(cfg.StreamCacheTTL, cfg.StreamCacheMaxEvents)
 	userEvents := userevent.New(cfg.UserEventTTL, cfg.UserEventMaxEvents)
 	attachments := service.NewAttachment(repositories.Conversations, repositories.Attachments, store, providers, service.AttachmentConfig{
@@ -88,9 +95,24 @@ func NewServerWithRAGGateways(repositories *repository.Repositories, jwtManager 
 	})
 	adminService := service.NewAdmin(repositories.Users, repositories.Auth, quotas)
 	alerter := alerting.NewZap()
-	tools := tool.NewDefaultRegistry()
+	var search websearch.Searcher
+	if cfg.AgentTools.SearchEnabled {
+		search = websearch.NewTavily(cfg.AgentTools.SearchAPIKey, cfg.AgentTools.SearchMaxResults, cfg.AgentTools.SearchTimeout)
+	}
+	plans := service.NewPlan(repositories.AgentTools, repositories.Conversations, userEvents)
+	interactions := service.NewInteraction(repositories.AgentTools, repositories.Conversations, userEvents, cfg.AgentTools.HumanTimeout)
+	artifacts := service.NewArtifact(repositories.AgentTools, repositories.Conversations, userEvents)
+	toolState := service.NewToolState(repositories.AgentTools, repositories.Conversations)
+	tools := tool.NewDefaultRegistry(tool.NewBuiltinTools(tool.BuiltinDependencies{
+		Execution: executor, Plans: plans, Interactions: interactions, Artifacts: artifacts, Search: search, HumanTimeout: cfg.AgentTools.HumanTimeout,
+	})...)
+	tools.SetApprovalGuard(interactions)
+	adminOnly := append([]string(nil), cfg.ToolAdminOnly...)
+	if cfg.Execution.AdminOnly {
+		adminOnly = append(adminOnly, tool.ExecutionToolNames()...)
+	}
 	tools.Configure(tool.SafetyConfig{
-		Policy:           tool.NewRolePolicy(adminService, cfg.ToolAdminOnly),
+		Policy:           tool.NewRolePolicy(adminService, adminOnly),
 		MaxArgumentBytes: cfg.ToolArgumentMaxBytes,
 		MaxResultBytes:   cfg.ToolResultMaxBytes,
 		Timeout:          cfg.ToolExecutionTimeout,
@@ -138,6 +160,7 @@ func NewServerWithRAGGateways(repositories *repository.Repositories, jwtManager 
 		attachments,
 	)
 	handlers.ConfigureAuthCookies(handler.AuthCookieConfig{Name: cfg.RefreshCookieName, Secure: cfg.RefreshCookieSecure})
+	handlers.ConfigureToolServices(toolState, interactions, artifacts)
 	estimator, err := embeddinggateway.NewTokenEstimator(cfg.Embedding.Tokenizer)
 	if err != nil {
 		estimator = embeddinggateway.HeuristicTokenEstimator{}

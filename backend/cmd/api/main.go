@@ -13,6 +13,7 @@ import (
 	"github.com/example/agent-platform/backend/internal/config"
 	"github.com/example/agent-platform/backend/internal/database"
 	"github.com/example/agent-platform/backend/internal/embeddinggateway"
+	"github.com/example/agent-platform/backend/internal/execution"
 	"github.com/example/agent-platform/backend/internal/httpapi"
 	"github.com/example/agent-platform/backend/internal/llmgateway"
 	"github.com/example/agent-platform/backend/internal/logger"
@@ -127,7 +128,13 @@ func main() {
 	default:
 		emailSender = mailer.LogSender{}
 	}
-	server := httpapi.NewServerWithRAGGateways(repositories, jwtManager, providers, limiter, ratelimit.NewRedis(redisClient, ""), store, emailSender, embeddings, reranker, cfg)
+	executor, err := execution.New(cfg.Execution, nil)
+	if err != nil {
+		logger.Error(context.Background(), "execution gateway initialization failed", logger.Err(err))
+		os.Exit(1)
+	}
+	defer executor.Close()
+	server := httpapi.NewServerWithExecutionGateway(repositories, jwtManager, providers, limiter, ratelimit.NewRedis(redisClient, ""), store, emailSender, embeddings, reranker, executor, cfg)
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
 	server.CleanupKnowledgeObjects(cleanupCtx)
 	cancelCleanup()
